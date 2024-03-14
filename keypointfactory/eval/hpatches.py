@@ -21,9 +21,8 @@ from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import (
     eval_homography_dlt,
     eval_homography_robust,
-    eval_matches_homography,
-    eval_poses,
     eval_keypoints_homography,
+    eval_poses,
 )
 
 
@@ -114,12 +113,17 @@ class HPatchesPipeline(EvalPipeline):
             data = map_tensor(data, lambda t: torch.squeeze(t, dim=0))
             # add custom evaluations here
             if "keypoints0" in pred:
-                results_i = eval_matches_homography(data, pred)
+                results_i = {}
+                # results_i = eval_matches_homography(data, pred)
                 results_i = {**results_i, **eval_homography_dlt(data, pred)}
                 if "matches0" in pred:
                     results_i = {
                         **results_i,
-                        **eval_keypoints_homography(data, pred, 3.0, 200), # use config for correctness threshold (?), top keypoints (?)
+                        **eval_keypoints_homography(
+                            data, pred, 3.0, 200
+                        ),  # use config for
+                        # correctness threshold (?),
+                        # top keypoints (?)
                     }
             else:
                 results_i = {}
@@ -145,7 +149,7 @@ class HPatchesPipeline(EvalPipeline):
             arr = np.array(v)
             if not np.issubdtype(np.array(v).dtype, np.number):
                 continue
-            summaries[f"m{k}"] = round(np.median(arr), 3)
+            summaries[f"m{k}"] = round(np.mean(arr), 3)
 
         auc_ths = [1, 3, 5]
         best_pose_results, best_th = eval_poses(

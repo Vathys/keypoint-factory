@@ -1,13 +1,13 @@
 import numpy as np
 import torch
 from kornia.geometry.homography import find_homography_dlt
-from scipy.stats import pearsonr
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-)  # implement roc_auc_score and average_precision on your own?
+from scipy.stats import chi2, pearsonr
 
-# ask about AUCMetrics class
+# implement roc_auc_score and average_precision on your own?
+from sklearn.metrics import (
+    average_precision_score,
+    roc_auc_score,
+)
 
 from ..geometry.epipolar import generalized_epi_dist, relative_pose_error
 from ..geometry.gt_generation import IGNORE_FEATURE
@@ -91,9 +91,6 @@ def eval_keypoints_homography(
     kpts_scores0 = pred["keypoint_scores0"]
     kpts_scores1 = pred["keypoint_scores1"]
 
-    valid_matches0 = pred["matches0"] > 0
-    valid_matches1 = pred["matches1"] > 0
-
     kpts0_1 = warp_points_torch(kpts0, H_gt, inverse=False)
     kpts1_0 = warp_points_torch(kpts1, H_gt, inverse=True)
 
@@ -140,7 +137,7 @@ def eval_keypoints_homography(
     prec0 = ((correct0[vis0] & pred0).sum().float() / pred0.sum()).float().item()
     prec1 = ((correct1[vis1] & pred1).sum().float() / pred1.sum()).float().item()
 
-    results[f"prec0@{top_kpts}pts"] = (prec0 + prec1) / 2
+    results[f"prec@{top_kpts}pts"] = (prec0 + prec1) / 2
 
     rec0 = (
         ((correct0[vis0] & pred0).sum().float() / correct0[vis0].sum()).float().item()
@@ -149,19 +146,26 @@ def eval_keypoints_homography(
         ((correct1[vis1] & pred1).sum().float() / correct1[vis1].sum()).float().item()
     )
 
-    results[f"recall0@{top_kpts}pts"] = (rec0 + rec1) / 2
+    results[f"recall@{top_kpts}pts"] = (rec0 + rec1) / 2
 
     results["loc_err"] = (
         dist0[vis0 & correct0].mean() + dist1[vis1 & correct1].mean()
     ) / 2
 
-    # Is there a way to combine the p-values?
-    # Look at Fisher's Score.
     dd_corr0, dd_corr_p0 = pearsonr(torch.log(dist0[vis0]), ddescriptors0[vis0])
 
     dd_corr1, dd_corr_p1 = pearsonr(torch.log(dist1[vis1]), ddescriptors1[vis1])
 
+    # Sometimes p-values are interpreted as 0 throwing divide by 0 errors
+    # I think, we can safely ignore these cases
+    with np.errstate(divide="ignore"):
+        fisher_score = -2 * (np.log(dd_corr_p0) + np.log(dd_corr_p1))
+
     results["ddescriptor_corr"] = (dd_corr0 + dd_corr1) / 2
+    # We combine the p-values using Fisher's method
+    # Resulting score is chi2 distributed with 2k degrees of freedom
+    # where k is the number of p-values.
+    results["ddescriptor_corr_pval"] = chi2.sf(fisher_score, 4)
 
     results["repeatability"] = (
         div0(correct0[vis0].sum() + correct1[vis1].sum(), vis0.sum() + vis1.sum())
