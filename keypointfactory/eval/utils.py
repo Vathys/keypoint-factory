@@ -2,7 +2,11 @@ import numpy as np
 import torch
 from kornia.geometry.homography import find_homography_dlt
 from scipy.stats import pearsonr
-from sklearn.metrics import roc_auc_score, average_precision_score # implement roc_auc_score and average_precision on your own?
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+)  # implement roc_auc_score and average_precision on your own?
+
 # ask about AUCMetrics class
 
 from ..geometry.epipolar import generalized_epi_dist, relative_pose_error
@@ -123,71 +127,41 @@ def eval_keypoints_homography(
 
     results = {}
 
-    results["roc_auc0"] = roc_auc_score(valid_matches0[vis0], kpts_scores0[vis0])
-    results["roc_auc1"] = roc_auc_score(valid_matches1[vis1], kpts_scores1[vis1])
+    roc_auc0 = roc_auc_score(correct0[vis0], kpts_scores0[vis0])
+    roc_auc1 = roc_auc_score(correct1[vis1], kpts_scores1[vis1])
 
-    results["avg_prec0"] = average_precision_score(
-        valid_matches0[vis0], kpts_scores0[vis0]
-    )
-    results["avg_prec1"] = average_precision_score(
-        valid_matches1[vis1], kpts_scores1[vis1]
-    )
+    results["roc_auc"] = (roc_auc0 + roc_auc1) / 2
 
-    results[f"prec0@{top_kpts}pts"] = (
-        ((valid_matches0[vis0] & pred0).sum().float() / valid_matches0[vis0].sum())
-        .float()
-        .item()
-    )
-    results[f"prec1@{top_kpts}pts"] = (
-        ((valid_matches1[vis1] & pred1).sum().float() / valid_matches1[vis0].sum())
-        .float()
-        .item()
-    )
+    avg_prec0 = average_precision_score(correct0[vis0], kpts_scores0[vis0])
+    avg_prec1 = average_precision_score(correct1[vis1], kpts_scores1[vis1])
 
-    results[f"recall0@{top_kpts}pts"] = (
-        ((valid_matches0[vis0] & pred0).sum().float() / pred0.sum()).float().item()
+    results["avg_prec"] = (avg_prec0 + avg_prec1) / 2
+
+    prec0 = ((correct0[vis0] & pred0).sum().float() / pred0.sum()).float().item()
+    prec1 = ((correct1[vis1] & pred1).sum().float() / pred1.sum()).float().item()
+
+    results[f"prec0@{top_kpts}pts"] = (prec0 + prec1) / 2
+
+    rec0 = (
+        ((correct0[vis0] & pred0).sum().float() / correct0[vis0].sum()).float().item()
     )
-    results[f"recall1@{top_kpts}pts"] = (
-        ((valid_matches1[vis1] & pred1).sum().float() / pred1.sum()).float().item()
+    rec1 = (
+        ((correct1[vis1] & pred1).sum().float() / correct1[vis1].sum()).float().item()
     )
 
-    results["correct_prec0"] = (
-        (
-            (valid_matches0[vis0] & correct0[vis0]).sum().float()
-            / valid_matches0[vis0].sum()
-        )
-        .float()
-        .item()
-    )
-    results["correct_prec1"] = (
-        (
-            (valid_matches1[vis1] & correct1[vis1]).sum().float()
-            / valid_matches1[vis1].sum()
-        )
-        .float()
-        .item()
-    )
+    results[f"recall0@{top_kpts}pts"] = (rec0 + rec1) / 2
 
-    results["correct_recall0"] = (
-        ((valid_matches0[vis0] & correct0[vis0]).sum().float() / correct0[vis0].sum())
-        .float()
-        .item()
-    )
-    results["correct_recall1"] = (
-        ((valid_matches1[vis1] & correct1[vis1]).sum().float() / correct1[vis1].sum())
-        .float()
-        .item()
-    )
+    results["loc_err"] = (
+        dist0[vis0 & correct0].mean() + dist1[vis1 & correct1].mean()
+    ) / 2
 
-    results["loc_err0"] = dist0[vis0 & correct0].float().mean().nan_to_num().item()
-    results["loc_err1"] = dist1[vis1 & correct1].float().mean().nan_to_num().item()
+    # Is there a way to combine the p-values?
+    # Look at Fisher's Score.
+    dd_corr0, dd_corr_p0 = pearsonr(torch.log(dist0[vis0]), ddescriptors0[vis0])
 
-    results["ddescriptor_corr0"], results["ddescriptor_corr_pval0"] = pearsonr(
-        torch.log(dist0[vis0]), ddescriptors0[vis0]
-    )
-    results["ddescriptor_corr1"], results["ddescriptor_corr_pval1"] = pearsonr(
-        torch.log(dist1[vis1]), ddescriptors1[vis1]
-    )
+    dd_corr1, dd_corr_p1 = pearsonr(torch.log(dist1[vis1]), ddescriptors1[vis1])
+
+    results["ddescriptor_corr"] = (dd_corr0 + dd_corr1) / 2
 
     results["repeatability"] = (
         div0(correct0[vis0].sum() + correct1[vis1].sum(), vis0.sum() + vis1.sum())
