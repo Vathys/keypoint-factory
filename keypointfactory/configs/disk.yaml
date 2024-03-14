@@ -12,7 +12,7 @@ benchmarks:
             ransac_th: 0.5
         model:
             extractor:
-                max_num_keypoints: 1024  # overwrite config above
+                max_num_keypoints: 2048  # overwrite config above
             matcher:
                 name: matchers.homography_matcher
                 th_positive: 3.0
