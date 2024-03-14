@@ -32,6 +32,7 @@ dependencies = [
     "kornia",
     "seaborn",
     "joblib",
+    "scikit-learn", # temp
 ]
 urls = {Repository = "https://github.com/cvg/glue-factory"}
 

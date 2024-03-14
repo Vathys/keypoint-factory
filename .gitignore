@@ -1,10 +1,9 @@
 .venv
-/build/
+build/
 *.egg-info
 *.pyc
-/.idea/
-/venv/
-/data/
-/outputs/
+.idea/
 __pycache__
 notebooks/
+data
+outputs

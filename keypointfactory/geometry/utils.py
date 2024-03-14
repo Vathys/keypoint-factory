@@ -165,3 +165,14 @@ def get_image_coords(img):
             dim=0,
         ).permute(1, 2, 0)
     )[None] + 0.5
+
+
+def div0(a, b):
+    c = torch.true_divide(a, b)
+    if torch.numel(c) == 1:
+        c = c if torch.isfinite(c) else (1 if a == 0 else 0)
+    else:
+        idx = ~torch.isfinite(c)
+        c[idx] = torch.where(a[idx] == 0, 1, 0)
+
+    return c

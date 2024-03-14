@@ -23,6 +23,7 @@ from .utils import (
     eval_homography_robust,
     eval_matches_homography,
     eval_poses,
+    eval_keypoints_homography,
 )
 
 
@@ -94,21 +95,6 @@ class HPatchesPipeline(EvalPipeline):
             )
         return pred_file
 
-    # def run_eval(self, loader, pred_file):
-    #     assert pred_file.exists()
-    #     results = defaultdict(list)
-
-    #     conf = self.conf.eval
-
-    #     test_thresholds = (
-    #         ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
-    #         if not isinstance(conf.ransac_th, Iterable)
-    #         else conf.ransac_th
-    #     )
-        
-
-    #     raise NotImplementedError()
-
     def run_eval(self, loader, pred_file):
         assert pred_file.exists()
         results = defaultdict(list)
@@ -130,6 +116,11 @@ class HPatchesPipeline(EvalPipeline):
             if "keypoints0" in pred:
                 results_i = eval_matches_homography(data, pred)
                 results_i = {**results_i, **eval_homography_dlt(data, pred)}
+                if "matches0" in pred:
+                    results_i = {
+                        **results_i,
+                        **eval_keypoints_homography(data, pred, 3.0, 200), # use config for correctness threshold (?), top keypoints (?)
+                    }
             else:
                 results_i = {}
             for th in test_thresholds:

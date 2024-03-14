@@ -1,10 +1,18 @@
 import numpy as np
 import torch
 from kornia.geometry.homography import find_homography_dlt
+from scipy.stats import pearsonr
+from sklearn.metrics import roc_auc_score, average_precision_score # implement roc_auc_score and average_precision on your own?
+# ask about AUCMetrics class
 
 from ..geometry.epipolar import generalized_epi_dist, relative_pose_error
 from ..geometry.gt_generation import IGNORE_FEATURE
-from ..geometry.homography import homography_corner_error, sym_homography_error
+from ..geometry.homography import (
+    homography_corner_error,
+    sym_homography_error,
+    warp_points_torch,
+)
+from ..geometry.utils import div0
 from ..robust_estimators import load_estimator
 from ..utils.tensor import index_batch
 from ..utils.tools import AUCMetric
@@ -16,6 +24,30 @@ def check_keys_recursive(d, pattern):
     else:
         for k in pattern:
             assert k in d.keys()
+
+
+def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
+
+    def compute_correctness_single(kpts, kpts_w):
+        dist = torch.norm(kpts_w[:, None] - kpts[None], dim=-1)
+        min_dist, matches = dist.min(dim=1)
+        correct = min_dist <= thresh
+        if mutual:
+            idx = dist.argmin(dim=1)
+            idx_w = dist.argmin(dim=0)
+            correct &= torch.eq(torch.arange(len(kpts_w)), idx_w[idx])
+        return min_dist, matches, correct
+
+    dist1, matches1, correct1 = compute_correctness_single(kpts2, kpts1_w)
+    dist2, matches2, correct2 = compute_correctness_single(kpts1, kpts2_w)
+    return {
+        "correct0": correct1,
+        "correct1": correct2,
+        "dist0": dist1,
+        "dist1": dist2,
+        "matches0": matches1,
+        "matches1": matches2,
+    }
 
 
 def get_matches_scores(kpts0, kpts1, matches0, mscores0):
@@ -35,6 +67,137 @@ def eval_per_batch_item(data: dict, pred: dict, eval_f, *args, **kwargs):
     ]
     # Return a dictionary of lists with the evaluation of each item
     return {k: [r[k] for r in results] for k in results[0].keys()}
+
+
+def eval_keypoints_homography(
+    data, pred, correctness_thresh=3.0, top_kpts=200, mutual=True
+):
+    check_keys_recursive(data, ["H_0to1"])
+    check_keys_recursive(pred, ["keypoints0", "keypoints1", "matches0", "matches1"])
+
+    H_gt = data["H_0to1"]
+    if H_gt.ndim > 2:
+        return eval_per_batch_item(data, pred, eval_keypoints_homography)
+
+    image0 = data["view0"]["image"].permute(1, 2, 0)
+    image1 = data["view1"]["image"].permute(1, 2, 0)
+
+    kpts0 = pred["keypoints0"]
+    kpts1 = pred["keypoints1"]
+    kpts_scores0 = pred["keypoint_scores0"]
+    kpts_scores1 = pred["keypoint_scores1"]
+
+    valid_matches0 = pred["matches0"] > 0
+    valid_matches1 = pred["matches1"] > 0
+
+    kpts0_1 = warp_points_torch(kpts0, H_gt, inverse=False)
+    kpts1_0 = warp_points_torch(kpts1, H_gt, inverse=True)
+
+    vis0 = torch.all(
+        (kpts0_1 >= 0) & (kpts0_1 <= torch.tensor(image1.shape[:2][::-1])), dim=-1
+    )
+    vis1 = torch.all(
+        (kpts1_0 >= 0) & (kpts1_0 <= torch.tensor(image0.shape[:2][::-1])), dim=-1
+    )
+
+    cor_dict = compute_correctness(
+        kpts0, kpts1, kpts0_1, kpts1_0, thresh=correctness_thresh, mutual=mutual
+    )
+    dist0 = cor_dict["dist0"]
+    dist1 = cor_dict["dist1"]
+    correct0 = cor_dict["correct0"]
+    correct1 = cor_dict["correct1"]
+    ddescriptors0 = torch.norm(
+        pred["descriptors0"] - pred["descriptors1"][cor_dict["matches0"]], p=2, dim=1
+    )
+    ddescriptors1 = torch.norm(
+        pred["descriptors1"] - pred["descriptors0"][cor_dict["matches1"]], p=2, dim=1
+    )
+    indices0 = kpts_scores0[vis0].sort(descending=True)[1][:top_kpts]
+    indices1 = kpts_scores1[vis1].sort(descending=True)[1][:top_kpts]
+    pred0, pred1 = torch.zeros_like(
+        kpts_scores0[vis0], dtype=torch.bool
+    ), torch.zeros_like(kpts_scores1[vis1], dtype=torch.bool)
+    pred0[indices0] = True
+    pred1[indices1] = True
+
+    results = {}
+
+    results["roc_auc0"] = roc_auc_score(valid_matches0[vis0], kpts_scores0[vis0])
+    results["roc_auc1"] = roc_auc_score(valid_matches1[vis1], kpts_scores1[vis1])
+
+    results["avg_prec0"] = average_precision_score(
+        valid_matches0[vis0], kpts_scores0[vis0]
+    )
+    results["avg_prec1"] = average_precision_score(
+        valid_matches1[vis1], kpts_scores1[vis1]
+    )
+
+    results[f"prec0@{top_kpts}pts"] = (
+        ((valid_matches0[vis0] & pred0).sum().float() / valid_matches0[vis0].sum())
+        .float()
+        .item()
+    )
+    results[f"prec1@{top_kpts}pts"] = (
+        ((valid_matches1[vis1] & pred1).sum().float() / valid_matches1[vis0].sum())
+        .float()
+        .item()
+    )
+
+    results[f"recall0@{top_kpts}pts"] = (
+        ((valid_matches0[vis0] & pred0).sum().float() / pred0.sum()).float().item()
+    )
+    results[f"recall1@{top_kpts}pts"] = (
+        ((valid_matches1[vis1] & pred1).sum().float() / pred1.sum()).float().item()
+    )
+
+    results["correct_prec0"] = (
+        (
+            (valid_matches0[vis0] & correct0[vis0]).sum().float()
+            / valid_matches0[vis0].sum()
+        )
+        .float()
+        .item()
+    )
+    results["correct_prec1"] = (
+        (
+            (valid_matches1[vis1] & correct1[vis1]).sum().float()
+            / valid_matches1[vis1].sum()
+        )
+        .float()
+        .item()
+    )
+
+    results["correct_recall0"] = (
+        ((valid_matches0[vis0] & correct0[vis0]).sum().float() / correct0[vis0].sum())
+        .float()
+        .item()
+    )
+    results["correct_recall1"] = (
+        ((valid_matches1[vis1] & correct1[vis1]).sum().float() / correct1[vis1].sum())
+        .float()
+        .item()
+    )
+
+    results["loc_err0"] = dist0[vis0 & correct0].float().mean().nan_to_num().item()
+    results["loc_err1"] = dist1[vis1 & correct1].float().mean().nan_to_num().item()
+
+    results["ddescriptor_corr0"], results["ddescriptor_corr_pval0"] = pearsonr(
+        torch.log(dist0[vis0]), ddescriptors0[vis0]
+    )
+    results["ddescriptor_corr1"], results["ddescriptor_corr_pval1"] = pearsonr(
+        torch.log(dist1[vis1]), ddescriptors1[vis1]
+    )
+
+    results["repeatability"] = (
+        div0(correct0[vis0].sum() + correct1[vis1].sum(), vis0.sum() + vis1.sum())
+        .float()
+        .item()
+    )
+    results["num_correct"] = (
+        correct0[vis0].sum().item() + correct1[vis1].sum().item()
+    ) / 2
+    return results
 
 
 def eval_matches_epipolar(data: dict, pred: dict) -> dict:
