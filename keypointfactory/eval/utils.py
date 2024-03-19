@@ -1,13 +1,8 @@
 import numpy as np
 import torch
+import warnings
 from kornia.geometry.homography import find_homography_dlt
 from scipy.stats import chi2, pearsonr
-
-# implement roc_auc_score and average_precision on your own?
-from sklearn.metrics import (
-    average_precision_score,
-    roc_auc_score,
-)
 
 from ..geometry.epipolar import generalized_epi_dist, relative_pose_error
 from ..geometry.gt_generation import IGNORE_FEATURE
@@ -28,6 +23,74 @@ def check_keys_recursive(d, pattern):
     else:
         for k in pattern:
             assert k in d.keys()
+
+
+# Transfer to another file later
+# Start to-transfer functions
+def get_rates(true, pred):
+    rates = {}
+    #    GT ->    True      False
+    #  || Pred
+    #  \/ True     TP        FP
+    #     False    FN        TN
+    rates["PPV"] = np.sum(true & pred, dtype=np.float64) / (
+        1e-8 + pred.sum()
+    )  # Positive predictive value (precision)
+    rates["TPR"] = np.sum(true & pred, dtype=np.float64) / (
+        1e-8 + true.sum()
+    )  # True positive rate (recall, sensitivity)
+    rates["FPR"] = np.sum(~true & pred, dtype=np.float64) / (
+        1e-8 + (~true).sum()
+    )  # False positive rate
+    rates["TNR"] = np.sum(~true & ~pred, dtype=np.float64) / (
+        1e-8 + (~true).sum()
+    )  # True negative rate (specificity)
+    return rates
+
+
+def get_pr_curve(true, score):
+    sorted_idx = np.argsort(score)
+    true = true[sorted_idx]
+    prec = []
+    rec = []
+    for i in range(1, len(true)):
+        pred = np.zeros_like(true)
+        pred[sorted_idx[:i]] = 1
+        vprec, vrec, _, _ = get_rates(true, pred).values()
+        prec.append(vprec)
+        rec.append(vrec)
+
+    return prec, rec
+
+
+def get_roc_curve(true, score):
+    sorted_idx = np.argsort(score)
+    true = true[sorted_idx]
+    fpr = []
+    tpr = []
+    for i in range(1, len(true)):
+        pred = np.zeros_like(true)
+        pred[sorted_idx[:i]] = 1
+        _, vtpr, vfpr, _ = get_rates(true, pred).values()
+        fpr.append(vfpr)
+        tpr.append(vtpr)
+
+    return fpr, tpr
+
+
+def calc_ap(prec_arr, rec_arr):
+    rec_arr = np.concatenate([[0], rec_arr, [1]])
+    prec_arr = np.concatenate([[0], prec_arr])
+    return np.sum((rec_arr[1:] - rec_arr[:-1]) * prec_arr)
+
+
+def calc_auc(fpr_arr, tpr_arr):
+    fpr_arr = np.concatenate([[0], fpr_arr, [1]])
+    tpr_arr = np.concatenate([[0], tpr_arr])
+    return np.sum((fpr_arr[1:] - fpr_arr[:-1]) * tpr_arr)
+
+
+# End to-transfer functions
 
 
 def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
@@ -114,39 +177,42 @@ def eval_keypoints_homography(
     ddescriptors1 = torch.norm(
         pred["descriptors1"] - pred["descriptors0"][cor_dict["matches1"]], p=2, dim=1
     )
-    indices0 = kpts_scores0[vis0].sort(descending=True)[1][:top_kpts]
-    indices1 = kpts_scores1[vis1].sort(descending=True)[1][:top_kpts]
-    pred0, pred1 = torch.zeros_like(
-        kpts_scores0[vis0], dtype=torch.bool
-    ), torch.zeros_like(kpts_scores1[vis1], dtype=torch.bool)
-    pred0[indices0] = True
-    pred1[indices1] = True
 
     results = {}
 
-    roc_auc0 = roc_auc_score(correct0[vis0], kpts_scores0[vis0])
-    roc_auc1 = roc_auc_score(correct1[vis1], kpts_scores1[vis1])
+    fpr_arr0, tpr_arr0 = get_roc_curve(correct0[vis0].numpy(), kpts_scores0[vis0])
+    fpr_arr1, tpr_arr1 = get_roc_curve(correct1[vis1].numpy(), kpts_scores1[vis1])
 
-    results["roc_auc"] = (roc_auc0 + roc_auc1) / 2
+    auc0 = calc_auc(fpr_arr0, tpr_arr0)
+    auc1 = calc_auc(fpr_arr1, tpr_arr1)
 
-    avg_prec0 = average_precision_score(correct0[vis0], kpts_scores0[vis0])
-    avg_prec1 = average_precision_score(correct1[vis1], kpts_scores1[vis1])
+    results["roc_auc"] = (auc0 + auc1) / 2
 
-    results["avg_prec"] = (avg_prec0 + avg_prec1) / 2
+    prec_arr0, rec_arr0 = get_pr_curve(correct0[vis0].numpy(), kpts_scores0[vis0])
+    prec_arr1, rec_arr1 = get_pr_curve(correct1[vis1].numpy(), kpts_scores1[vis1])
 
-    prec0 = ((correct0[vis0] & pred0).sum().float() / pred0.sum()).float().item()
-    prec1 = ((correct1[vis1] & pred1).sum().float() / pred1.sum()).float().item()
+    ap0 = calc_ap(prec_arr0, rec_arr0)
+    ap1 = calc_ap(prec_arr1, rec_arr1)
 
-    results[f"prec@{top_kpts}pts"] = (prec0 + prec1) / 2
+    results["ap"] = (ap0 + ap1) / 2
 
-    rec0 = (
-        ((correct0[vis0] & pred0).sum().float() / correct0[vis0].sum()).float().item()
+    # We take the minimum of the two lengths to avoid out of bounds errors
+    ntop_kpts = min(
+        top_kpts,
+        len(prec_arr0) - 1,
+        len(prec_arr1) - 1,
+        len(rec_arr0) - 1,
+        len(rec_arr1) - 1,
     )
-    rec1 = (
-        ((correct1[vis1] & pred1).sum().float() / correct1[vis1].sum()).float().item()
-    )
+    if ntop_kpts != top_kpts:
+        warnings.warn(
+            "Not enough keypoints to compare between images. "
+            + f"Replacing {top_kpts} with {ntop_kpts}.",
+            RuntimeWarning,
+        )
+    results[f"prec@{top_kpts}pts"] = (prec_arr0[ntop_kpts] + prec_arr1[ntop_kpts]) / 2
 
-    results[f"recall@{top_kpts}pts"] = (rec0 + rec1) / 2
+    results[f"recall@{top_kpts}pts"] = (rec_arr0[ntop_kpts] + rec_arr1[ntop_kpts]) / 2
 
     results["loc_err"] = (
         dist0[vis0 & correct0].mean() + dist1[vis1 & correct1].mean()
