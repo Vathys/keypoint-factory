@@ -127,6 +127,7 @@ class SIFT(BaseModel):
                 nfeatures=self.conf.max_num_keypoints,
                 edgeThreshold=self.conf.edge_threshold,
                 nOctaveLayers=self.conf.num_octaves,
+                enable_precise_upscale=True,
             )
         else:
             backends = {"opencv", "pycolmap", "pycolmap_cpu", "pycolmap_cuda"}

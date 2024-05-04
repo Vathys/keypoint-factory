@@ -35,12 +35,16 @@ class ImagePreprocessor:
             if interpolation is None:
                 interpolation = self.conf.interpolation
             size = self.get_new_image_size(h, w)
+            if interpolation in ("nearest", "area"):
+                align_corners = None
+            else:
+                align_corners = self.conf.align_corners
             img = kornia.geometry.transform.resize(
                 img,
                 size,
                 side=self.conf.side,
                 antialias=self.conf.antialias,
-                align_corners=self.conf.align_corners,
+                align_corners=align_corners,
                 interpolation=interpolation,
             )
         scale = torch.Tensor([img.shape[-1] / w, img.shape[-2] / h]).to(img)

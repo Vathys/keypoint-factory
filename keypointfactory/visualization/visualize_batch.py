@@ -55,3 +55,6 @@ def make_match_figures(pred_, data_, n_pairs=2):
     ]
 
     return {"matching": fig}
+
+def make_keypoint_figures(pred_, data_, n_pairs=2):
+    pass

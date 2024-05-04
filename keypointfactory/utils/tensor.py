@@ -23,6 +23,26 @@ def map_tensor(input_, func):
         return func(input_)
 
 
+def map_tensor_filtered(input_, func, filter_func):
+    if isinstance(input_, string_classes):
+        return input_
+    elif isinstance(input_, collections.Mapping):
+        return {
+            k: (
+                map_tensor_filtered(sample, func, filter_func)
+                if filter_func(k)
+                else sample
+            )
+            for k, sample in input_.items()
+        }
+    elif isinstance(input_, collections.Sequence):
+        return [map_tensor_filtered(sample, func, filter_func) for sample in input_]
+    elif input_ is None:
+        return None
+    else:
+        return func(input_)
+
+
 def batch_to_numpy(batch):
     return map_tensor(batch, lambda tensor: tensor.cpu().numpy())
 

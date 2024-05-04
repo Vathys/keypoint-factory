@@ -155,3 +155,11 @@ class BaseModel(nn.Module, metaclass=MetaModel):
         for _, w in self.named_parameters():
             if isinstance(w, BaseModel):
                 w.set_initialized(to)
+
+    def _pre_loss_callback(self, seed, epoch):
+        """Callback called before computing the loss."""
+        pass
+
+    def _post_loss_callback(self, seed, epoch):
+        """Callback called after computing the loss."""
+        pass
