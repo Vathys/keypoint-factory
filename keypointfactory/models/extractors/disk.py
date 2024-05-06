@@ -69,20 +69,33 @@ class ConsistentMatchDistribution:
         affinity = -inverse_T * distances
 
         self._cat_I = torch.distributions.Categorical(logits=affinity)
-        self._cat_T = torch.distributions.Categorical(logits=affinity.permute(0, 2, 1))
+        if affinity.dim() == 2:
+            self._cat_T = torch.distributions.Categorical(logits=affinity.T)
+        else:
+            self._cat_T = torch.distributions.Categorical(
+                logits=affinity.permute(0, 2, 1)
+            )
 
         self._dense_logp = None
         self._dense_p = None
 
     def dense_p(self):
         if self._dense_p is None:
-            self._dense_p = self._cat_I.probs * self._cat_T.probs.permute(0, 2, 1)
+            if self._cat_I.probs.dim() == 2:
+                self._dense_p = self._cat_I.probs * self._cat_T.probs.T
+            else:
+                self._dense_p = self._cat_I.probs * self._cat_T.probs.permute(0, 2, 1)
 
         return self._dense_p
 
     def dense_logp(self):
         if self._dense_logp is None:
-            self._dense_logp = self._cat_I.logits + self._cat_T.logits.permute(0, 2, 1)
+            if self._cat_I.logits.dim() == 2:
+                self._dense_logp = self._cat_I.logits + self._cat_T.logits.T
+            else:
+                self._dense_logp = self._cat_I.logits + self._cat_T.logits.permute(
+                    0, 2, 1
+                )
 
         return self._dense_logp
 
@@ -136,6 +149,11 @@ def classify_by_epipolar(data, pred, threshold=2.0):
 
     epi_0_1 = asymm_epipolar_distance_all(kpts0, kpts1, F_0_1).abs()
     epi_1_0 = asymm_epipolar_distance_all(kpts1, kpts0, F_1_0).abs()
+
+    if epi_0_1.dim() == 2:
+        epi_0_1 = epi_0_1.unsqueeze(0)
+    if epi_1_0.dim() == 2:
+        epi_1_0 = epi_1_0.unsqueeze(0)
 
     return (epi_0_1 < threshold).permute(0, 2, 1) & (epi_1_0 < threshold)
 
@@ -394,7 +412,7 @@ class DISK(BaseModel):
 
         return {
             "keypoints": keypoints,
-            "keypoints_score": scores,
+            "keypoint_scores": scores,
             "descriptors": descriptors,
         }
 
@@ -424,8 +442,8 @@ class DISK(BaseModel):
 
         sample_logp = match_dist.dense_logp()
 
-        logp0 = pred["keypoints_score0"]
-        logp1 = pred["keypoints_score1"]
+        logp0 = pred["keypoint_scores0"]
+        logp1 = pred["keypoint_scores1"]
 
         kpts_logp = logp0[:, :, None] + logp1[:, None, :]
 
@@ -439,16 +457,15 @@ class DISK(BaseModel):
         loss = -reinforce - kp_penalty
 
         n_keypoints = torch.tensor(
-            logp0.shape[-2] + logp1.shape[-2]
+            logp0.shape[-2] + logp1.shape[-2], device=logp0.device
         ).repeat(loss.shape[0])
         exp_n_pairs = sample_p.sum(dim=(1, 2))
         exp_reward = (sample_p * elementwise_reward).sum(
             dim=(1, 2)
         ) + self.conf.loss.lambda_kp * n_keypoints
 
-        return {
-            "total": loss.sum(),
+        return {"total": loss}, {
             "reward": exp_reward,
-            "n_keypoints": n_keypoints,
+            "n_keypoints": n_keypoints.float(),
             "n_pairs": exp_n_pairs,
-        }, {}
+        }

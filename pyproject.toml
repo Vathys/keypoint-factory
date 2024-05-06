@@ -32,9 +32,8 @@ dependencies = [
     "kornia",
     "seaborn",
     "joblib",
-    "scikit-learn", # temp
 ]
-urls = {Repository = "https://github.com/cvg/glue-factory"}
+urls = {Repository = "https://github.com/Vathys/keypoint-factory"}
 
 [project.optional-dependencies]
 extra = [
@@ -48,8 +47,8 @@ dev = ["black", "flake8", "isort", "parameterized"]
 include = ["keypointfactory*"]
 
 [tool.setuptools.package-data]
-gluefactory = ["datasets/megadepth_scene_lists/*.txt", "configs/*.yaml"]
+keypointfactory = ["datasets/megadepth_scene_lists/*.txt", "configs/*.yaml"]
 
 [tool.isort]
 profile = "black"
-extend_skip = ["gluefactory_nonfree/"]
+extend_skip = ["keypointfactory_nonfree/"]

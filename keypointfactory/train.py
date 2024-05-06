@@ -27,7 +27,7 @@ from .models import get_model
 from .settings import EVAL_PATH, TRAINING_PATH
 from .utils.experiments import get_best_checkpoint, get_last_checkpoint, save_experiment
 from .utils.stdout_capturing import capture_outputs
-from .utils.tensor import batch_to_device
+from .utils.tensor import batch_to_device, map_tensor_filtered
 from .utils.tools import (
     AverageMetric,
     MedianMetric,
@@ -418,13 +418,31 @@ def training(rank, conf, output_dir, args):
                 tot_n_samples *= train_loader.batch_size
 
             model.train()
-            optimizer.zero_grad()
+            substep_ = conf.get("substep", 1)
+            if it % substep_ == substep_ - 1:
+                optimizer.zero_grad()
 
+            detach_keys = [
+                "keypoint_scores0",
+                "keypoint_scores1",
+                "descriptors0",
+                "descriptors1",
+            ]
             with autocast(enabled=args.mixed_precision is not None, dtype=mp_dtype):
                 data = batch_to_device(data, device, non_blocking=True)
+                model._pre_loss_callback(conf.train.seed, epoch)
                 pred = model(data)
-                losses, _ = loss_fn(pred, data)
+                # in the original disk, only the descriptors and keypoint scores are
+                # detached. I'm not sure why this is?
+                detached_pred = map_tensor_filtered(
+                    pred,
+                    lambda x: x.detach().requires_grad_(),
+                    lambda x: x in detach_keys,
+                )
+                losses, _ = loss_fn(detached_pred, data)
+                model._post_loss_callback(conf.train.seed, epoch)
                 loss = torch.mean(losses["total"])
+
             if torch.isnan(loss).any():
                 print(f"Detected NAN, skipping iteration {it}")
                 del pred, data, loss, losses
@@ -437,38 +455,48 @@ def training(rank, conf, output_dir, args):
                     do_backward, torch.distributed.ReduceOp.PRODUCT
                 )
                 do_backward = do_backward > 0
+
             if do_backward:
                 scaler.scale(loss).backward()
-                if args.detect_anomaly:
-                    # Check for params without any gradient which causes
-                    # problems in distributed training with checkpointing
-                    detected_anomaly = False
-                    for name, param in model.named_parameters():
-                        if param.grad is None and param.requires_grad:
-                            print(f"param {name} has no gradient.")
-                            detected_anomaly = True
-                    if detected_anomaly:
-                        raise RuntimeError("Detected anomaly in training.")
-                if conf.train.get("clip_grad", None):
-                    scaler.unscale_(optimizer)
-                    try:
-                        torch.nn.utils.clip_grad_norm_(
-                            all_params,
-                            max_norm=conf.train.clip_grad,
-                            error_if_nonfinite=True,
-                        )
+
+                leaves = [pred[k] for k in detach_keys]
+                grads = [detached_pred[k].grad for k in detach_keys]
+
+                torch.autograd.backward(leaves, grads)
+
+                if it % substep_ == substep_ - 1:
+                    if args.detect_anomaly:
+                        # Check for params without any gradient which causes
+                        # problems in distributed training with checkpointing
+                        detected_anomaly = False
+                        for name, param in model.named_parameters():
+                            if param.grad is None and param.requires_grad:
+                                print(f"param {name} has no gradient.")
+                                detected_anomaly = True
+                        if detected_anomaly:
+                            raise RuntimeError("Detected anomaly in training.")
+                    if conf.train.get("clip_grad", None):
+                        scaler.unscale_(optimizer)
+                        try:
+                            torch.nn.utils.clip_grad_norm_(
+                                all_params,
+                                max_norm=conf.train.clip_grad,
+                                error_if_nonfinite=True,
+                            )
+                            scaler.step(optimizer)
+                        except RuntimeError:
+                            logger.warning(
+                                "NaN detected in gradients. Skipping iteration."
+                            )
+                        scaler.update()
+                    else:
                         scaler.step(optimizer)
-                    except RuntimeError:
-                        logger.warning("NaN detected in gradients. Skipping iteration.")
-                    scaler.update()
+                        scaler.update()
+                    if not conf.train.lr_schedule.on_epoch:
+                        lr_scheduler.step()
                 else:
-                    scaler.step(optimizer)
-                    scaler.update()
-                if not conf.train.lr_schedule.on_epoch:
-                    lr_scheduler.step()
-            else:
-                if rank == 0:
-                    logger.warning(f"Skip iteration {it} due to detach.")
+                    if rank == 0:
+                        logger.warning(f"Skip iteration {it} due to detach.")
 
             if args.profile:
                 prof.step()
