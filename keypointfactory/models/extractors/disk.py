@@ -141,7 +141,7 @@ class ConsistentMatcher(torch.nn.Module):
 
 
 class CycleMatcher:
-    def match_features_(self, pred):
+    def match_features(self, pred):
         descriptors0 = pred["descriptors0"]
         descriptors1 = pred["descriptors1"]
 
@@ -165,15 +165,6 @@ class CycleMatcher:
                 )
             )
         matches = pad_and_stack(matches, None, -1, mode="constant", constant=-1)
-        return matches
-
-    def match_pairs(self, pred):
-        matches = {}
-        if "0to1" in pred:
-            for idx in ["0to1", "0to2", "1to2"]:
-                matches[idx] = self.match_features_(pred[idx])
-        else:
-            matches["0to1"] = self.match_features_(pred)
         return matches
 
 
@@ -431,13 +422,7 @@ class DISK(BaseModel):
                 keypoints,
                 target_length,
                 -2,
-                mode="random_c",
-                bounds=(
-                    0,
-                    data.get("image_size", torch.tensor(images.shape[-2:]))
-                    .min()
-                    .item(),
-                ),
+                mode="zeros",
             )
             scores = pad_and_stack(scores, target_length, -1, mode="zeros")
             descriptors = pad_and_stack(descriptors, target_length, -2, mode="zeros")
@@ -501,12 +486,48 @@ class DISK(BaseModel):
         loss = -reinforce - kp_penalty
 
         if self.eval_mode:
-            # calculate metrics
-            pass
+            n_kpts = torch.tensor(
+                pred["keypoints0"].shape[-1] + pred["keypoints1"].shape[-1],
+                device=pred["keypoints0"].device,
+            ).repeat(logp0.shape[0])
+
+            e_matches = self.val_matcher.match_features(pred)
+
+            kpts0 = pred["keypoints0"].gather(1, e_matches)
+            kpts1 = pred["keypoints1"].gather(1, e_matches)
+
+            n_pairs = e_matches.shape[1]
+
+            good = classify_by_epipolar(
+                data, {"keypoints0": kpts0, "keypoints1": kpts1}
+            )
+            good = good.diagonal(dim1=-2, dim2=-1)
+            bad = ~good
+
+            n_good = good.to(torch.int64).sum(dim=1)
+            n_bad = bad.to(torch.int64).sum(dim=1)
+            prec = n_good / (n_pairs + 1)
+
+            reward = (
+                self.conf.loss.lambda_tp * n_good
+                + self.conf.loss.lambda_fp * n_bad
+                + self.conf.loss.lambda_kp * n_kpts
+            )
+
+            metrics = {
+                "n_kpts": n_kpts,
+                "n_pairs": n_pairs,
+                "n_good": n_good,
+                "n_bad": n_bad,
+                "prec": prec,
+                "reward": reward,
+            }
+        else:
+            metrics = {}
 
         return {
             "total": loss,
             "reward": exp_reward,
             "n_keypoints": n_keypoints.float(),
             "n_pairs": exp_n_pairs,
-        }, {}
+        }, metrics
