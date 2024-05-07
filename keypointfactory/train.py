@@ -422,12 +422,12 @@ def training(rank, conf, output_dir, args):
             if it % substep_ == substep_ - 1:
                 optimizer.zero_grad()
 
-            detach_keys = [
-                "keypoint_scores0",
-                "keypoint_scores1",
-                "descriptors0",
-                "descriptors1",
-            ]
+            def filter_func(key):
+                if key.startswith("keypoint_scores") or key.startswith("descriptors"):
+                    return True
+                else:
+                    return False
+
             with autocast(enabled=args.mixed_precision is not None, dtype=mp_dtype):
                 data = batch_to_device(data, device, non_blocking=True)
                 model._pre_loss_callback(conf.train.seed, epoch)
@@ -437,12 +437,11 @@ def training(rank, conf, output_dir, args):
                 detached_pred = map_tensor_filtered(
                     pred,
                     lambda x: x.detach().requires_grad_(),
-                    lambda x: x in detach_keys,
+                    filter_func,
                 )
                 losses, _ = loss_fn(detached_pred, data)
-                model._post_loss_callback(conf.train.seed, epoch)
                 loss = torch.mean(losses["total"])
-
+                model._post_loss_callback(conf.train.seed, epoch)
             if torch.isnan(loss).any():
                 print(f"Detected NAN, skipping iteration {it}")
                 del pred, data, loss, losses
@@ -457,10 +456,15 @@ def training(rank, conf, output_dir, args):
                 do_backward = do_backward > 0
 
             if do_backward:
-                scaler.scale(loss).backward()
+                for sloss in losses["total"]:
+                    scaler.scale(sloss).backward(retain_graph=True)
 
-                leaves = [pred[k] for k in detach_keys]
-                grads = [detached_pred[k].grad for k in detach_keys]
+                leaves = [pred[k] for k in pred.keys() if filter_func(k)]
+                grads = [
+                    detached_pred[k].grad
+                    for k in detached_pred.keys()
+                    if filter_func(k)
+                ]
 
                 torch.autograd.backward(leaves, grads)
 

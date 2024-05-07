@@ -65,7 +65,7 @@ class ConsistentMatchDistribution:
         distances = distance_matrix(
             descriptors0,
             descriptors1,
-        )
+        ).to(inverse_T.device)
         affinity = -inverse_T * distances
 
         self._cat_I = torch.distributions.Categorical(logits=affinity)
@@ -140,6 +140,43 @@ class ConsistentMatcher(torch.nn.Module):
         return ConsistentMatchDistribution(pred, self.inverse_T)
 
 
+class CycleMatcher:
+    def match_features_(self, pred):
+        descriptors0 = pred["descriptors0"]
+        descriptors1 = pred["descriptors1"]
+
+        distances = distance_matrix(
+            descriptors0,
+            descriptors1,
+        ).to(descriptors0.device)
+
+        n_amin = torch.argmin(distances, dim=-1)
+        m_amin = torch.argmin(distances, dim=-2)
+
+        nnnn = m_amin.gather(1, n_amin)
+
+        n_ix = torch.arange(distances.shape[-2], device=distances.device)
+        matches = []
+        for i in range(nnnn.shape[0]):
+            mask = nnnn[i] == n_ix
+            matches.append(
+                torch.stack(
+                    [torch.nonzero(mask, as_tuple=False)[:, 0], n_amin[i][mask]], dim=0
+                )
+            )
+        matches = pad_and_stack(matches, None, -1, mode="constant", constant=-1)
+        return matches
+
+    def match_pairs(self, pred):
+        matches = {}
+        if "0to1" in pred:
+            for idx in ["0to1", "0to2", "1to2"]:
+                matches[idx] = self.match_features_(pred[idx])
+        else:
+            matches["0to1"] = self.match_features_(pred)
+        return matches
+
+
 def classify_by_epipolar(data, pred, threshold=2.0):
     F_0_1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], data["T_0to1"])
     F_1_0 = T_to_F(data["view1"]["camera"], data["view0"]["camera"], data["T_1to0"])
@@ -198,7 +235,6 @@ def depth_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
 
 class DISK(BaseModel):
     default_conf = {
-        "detector_type": "rng",  # one of [rng - training, nms - inference]
         "window_size": 8,
         "nms_radius": 2,  # matches with disk nms radius of 5
         "max_num_keypoints": None,
@@ -273,9 +309,11 @@ class DISK(BaseModel):
         )
 
         self.train_matcher = ConsistentMatcher(inverse_T=15.0)
+        self.val_matcher = CycleMatcher()
         # Turns training off for matcher
         self.train_matcher.requires_grad_(False)
         self.ramp = 0
+        self.eval_mode = True
 
     def _sample(self, heatmaps):
         v = self.conf.window_size
@@ -360,12 +398,10 @@ class DISK(BaseModel):
 
         heatmaps, descs = self._unet(images)
 
-        if self.conf.detector_type == "rng":
-            points, logps = self._sample(heatmaps)
-        elif self.conf.detector_type == "nms":
+        if self.eval_mode:
             points, logps = nms(heatmaps, self.conf.nms_radius)
         else:
-            raise ValueError(f"Unknown detector type: {self.conf.detector_type}")
+            points, logps = self._sample(heatmaps)
 
         keypoints = []
         scores = []
@@ -411,9 +447,9 @@ class DISK(BaseModel):
             descriptors = torch.stack(descriptors, 0)
 
         return {
-            "keypoints": keypoints,
-            "keypoint_scores": scores,
-            "descriptors": descriptors,
+            "keypoints": keypoints.float(),
+            "keypoint_scores": scores.float(),
+            "descriptors": descriptors.float(),
         }
 
     def _pre_loss_callback(self, seed, epoch):
@@ -454,18 +490,23 @@ class DISK(BaseModel):
         reinforce = (elementwise_reward * sample_plogp).sum(dim=(1, 2))
         kp_penalty = self.conf.loss.lambda_kp * kpts_logp_flat
 
-        loss = -reinforce - kp_penalty
-
         n_keypoints = torch.tensor(
-            logp0.shape[-2] + logp1.shape[-2], device=logp0.device
-        ).repeat(loss.shape[0])
+            logp0.shape[-1] + logp1.shape[-1], device=logp0.device
+        ).repeat(logp0.shape[0])
         exp_n_pairs = sample_p.sum(dim=(1, 2))
         exp_reward = (sample_p * elementwise_reward).sum(
             dim=(1, 2)
         ) + self.conf.loss.lambda_kp * n_keypoints
 
-        return {"total": loss}, {
+        loss = -reinforce - kp_penalty
+
+        if self.eval_mode:
+            # calculate metrics
+            pass
+
+        return {
+            "total": loss,
             "reward": exp_reward,
             "n_keypoints": n_keypoints.float(),
             "n_pairs": exp_n_pairs,
-        }
+        }, {}

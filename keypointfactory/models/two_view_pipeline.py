@@ -77,6 +77,7 @@ class TwoViewPipeline(BaseModel):
             **{k + "1": v for k, v in pred1.items()},
         }
 
+        # Remove matcher component to avoid later confusion?
         if self.conf.matcher.name:
             pred = {**pred, **self.matcher({**data, **pred})}
         if self.conf.filter.name:
@@ -92,7 +93,6 @@ class TwoViewPipeline(BaseModel):
     def loss(self, pred, data):
         losses = {}
         metrics = {}
-        total = 0
 
         # get labels
         if self.conf.ground_truth.name and not self.conf.run_gt_in_forward:
@@ -105,10 +105,10 @@ class TwoViewPipeline(BaseModel):
                 apply = self.conf[k].apply_loss
             if self.conf[k].name and apply:
                 try:
-                    losses_, metrics_ = getattr(self, k).loss(pred, {**pred, **data})
+                    losses_, metrics_ = getattr(self, k).loss(pred, data)
                 except NotImplementedError:
                     continue
                 losses = {**losses, **losses_}
                 metrics = {**metrics, **metrics_}
-                total = losses_["total"] + total
-        return {**losses, "total": total}, metrics
+
+        return losses_, metrics_
