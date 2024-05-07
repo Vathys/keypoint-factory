@@ -390,7 +390,7 @@ class _TripletDataset(_PairDataset):
                 if self.conf.num_overlap_bins > 1:
                     raise NotImplementedError("TODO")
                 valid = (self.images[scene] != None) & (  # noqa: E711
-                    self.depth[scene] != None  # noqa: E711
+                    self.depths[scene] != None  # noqa: E711
                 )
                 ind = np.where(valid)[0]
                 mat = info["overlap_matrix"][valid][:, valid]

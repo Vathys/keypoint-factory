@@ -29,9 +29,9 @@ def map_tensor_filtered(input_, func, filter_func):
     elif isinstance(input_, collections.Mapping):
         return {
             k: (
-                map_tensor_filtered(sample, func, filter_func)
+                map_tensor(sample, func)
                 if filter_func(k)
-                else sample
+                else map_tensor_filtered(sample, func, filter_func)
             )
             for k, sample in input_.items()
         }

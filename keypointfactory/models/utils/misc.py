@@ -22,6 +22,7 @@ def pad_to_length(
     pad_dim: int = -2,
     mode: str = "zeros",  # zeros, ones, random, random_c
     bounds: Tuple[int] = (None, None),
+    constant: float = 0.0,
 ):
     shape = list(x.shape)
     d = x.shape[pad_dim]
@@ -36,6 +37,8 @@ def pad_to_length(
         xn = torch.zeros(*shape, device=x.device, dtype=x.dtype)
     elif mode == "ones":
         xn = torch.ones(*shape, device=x.device, dtype=x.dtype)
+    elif mode == "constant":
+        xn = torch.full(shape, constant, device=x.device, dtype=x.dtype)
     elif mode == "random":
         low = low if low is not None else x.min()
         high = high if high is not None else x.max()
@@ -111,11 +114,11 @@ def size_is_pow2(t):
 
 
 def distance_matrix(fs1, fs2):
-    '''
+    """
     fs1: B x N x F
     fs2: B x M x F
     Assumes fs1 and fs2 are normalized!
     returns distance matrix of size N x M
-    '''
+    """
     dist = torch.einsum("...if,...jf->...ij", fs1, fs2)
-    return 1.414213 * (1. - dist).clamp(min=1e-6).sqrt()
+    return 1.414213 * (1.0 - dist).clamp(min=1e-6).sqrt()
