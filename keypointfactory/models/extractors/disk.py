@@ -1,5 +1,7 @@
 import torch
+from pathlib import Path
 
+from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
 from ..utils.blocks import get_module
 from ..utils.misc import pad_and_stack, distance_matrix
@@ -168,6 +170,53 @@ class CycleMatcher:
         return matches
 
 
+class Unet(torch.nn.Module):
+    def __init__(self, in_features, down, up, conf):
+        super(Unet, self).__init__()
+
+        self.up = up
+        self.down = down
+        self.in_features = in_features
+
+        size = conf.arch.kernel_size
+
+        down_block = get_module(conf.arch.down_block)
+        up_block = get_module(conf.arch.up_block)
+
+        down_dims = [in_features] + down
+        self.path_down = torch.nn.ModuleList()
+        for i, (d_in, d_out) in enumerate(zip(down_dims[:-1], down_dims[1:])):
+            block = down_block(
+                d_in, d_out, size=size, name=f"down_{i}", is_first=i == 0, conf=conf
+            )
+            self.path_down.append(block)
+
+        bottom_dims = [down[-1]] + up
+        horizontal_dims = down_dims[-2::-1]
+        self.path_up = torch.nn.ModuleList()
+        for i, (d_bot, d_hor, d_out) in enumerate(
+            zip(bottom_dims, horizontal_dims, up)
+        ):
+            block = up_block(d_bot, d_hor, d_out, size=size, name=f"up_{i}", conf=conf)
+            self.path_up.append(block)
+
+        self.n_params = 0
+        for params in self.parameters():
+            self.n_params += params.numel()
+
+    def forward(self, input):
+        features = [input]
+        for block in self.path_down:
+            features.append(block(features[-1]))
+
+        f_bot = features[-1]
+        features_horizontal = features[-2::-1]
+        for layer, f_hor in zip(self.path_up, features_horizontal):
+            f_bot = layer(f_bot, f_hor)
+
+        return f_bot
+
+
 def classify_by_epipolar(data, pred, threshold=2.0):
     F_0_1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], data["T_0to1"])
     F_1_0 = T_to_F(data["view1"]["camera"], data["view0"]["camera"], data["T_1to0"])
@@ -233,7 +282,9 @@ class DISK(BaseModel):
         "pad_if_not_divisible": True,
         "detection_threshold": 0.005,
         "desc_dim": 128,
+        "weights": None,
         "arch": {
+            "kernel_size": 5,
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
             "upsample": "TrivialUpsample",
@@ -243,6 +294,7 @@ class DISK(BaseModel):
             # "dropout": False, not used yet
             "bias": True,
             "padding": True,
+            "train_invT": False,
         },
         "loss": {
             "reward_threshold": 1.5,
@@ -257,52 +309,66 @@ class DISK(BaseModel):
     def _init(self, conf):
         self.set_initialized()
 
-        down_block = get_module(conf.arch.down_block)
-        up_block = get_module(conf.arch.up_block)
-        kernel_size = 5
-
-        # down dims [3] + [16, 32, 64, 64, 64]
-        self.path_down = torch.nn.ModuleList()
-        self.path_down.append(
-            down_block(3, 16, size=kernel_size, name="down_0", is_first=True, conf=conf)
-        )
-        self.path_down.append(
-            down_block(16, 32, size=kernel_size, name="down_1", conf=conf)
-        )
-        self.path_down.append(
-            down_block(32, 64, size=kernel_size, name="down_2", conf=conf)
-        )
-        self.path_down.append(
-            down_block(64, 64, size=kernel_size, name="down_3", conf=conf)
-        )
-        self.path_down.append(
-            down_block(64, 64, size=kernel_size, name="down_4", conf=conf)
-        )
-
-        # up dims = [64, 64, 64, desc_dim+1]
-        # bottom dims = [down[-1]] + up       = [64, 64, 64, 64,           desc_dim + 1]
-        # horizontal dims = down dims[-2::-1] = [64, 64, 32, 16,           3           ]
-        # out dims = up                       = [64, 64, 64, desc_dim + 1              ]
-        self.path_up = torch.nn.ModuleList()
-        self.path_up.append(
-            up_block(64, 64, 64, size=kernel_size, name="up_0", conf=conf)
-        )
-        self.path_up.append(
-            up_block(64, 64, 64, size=kernel_size, name="up_1", conf=conf)
-        )
-        self.path_up.append(
-            up_block(64, 32, 64, size=kernel_size, name="up_2", conf=conf)
-        )
-        self.path_up.append(
-            up_block(
-                64, 16, conf.desc_dim + 1, size=kernel_size, name="up_3", conf=conf
-            )
+        self.unet = Unet(
+            in_features=3,
+            down=[16, 32, 64, 64, 64],
+            up=[64, 64, 64, self.conf.desc_dim + 1],
+            conf=self.conf,
         )
 
         self.train_matcher = ConsistentMatcher(inverse_T=15.0)
+        self.train_matcher.requires_grad_(self.conf.arch.train_invT)
+
+        state_dict = None
+        if conf.weights:
+            if Path(conf.weights).exists():
+                print(f"Loading weights from {conf.weights}")
+                state_dict = torch.load(conf.weights, map_location="cpu")
+            elif (Path(DATA_PATH) / conf.weights).exists():
+                print(f"Loading weights from {Path(DATA_PATH) / conf.weights}")
+                state_dict = torch.load(
+                    Path(DATA_PATH) / conf.weights, map_location="cpu"
+                )
+            elif (Path(TRAINING_PATH) / conf.weights).exists():
+                print(f"Loading weights from {Path(TRAINING_PATH) / conf.weights}")
+                state_dict = torch.load(
+                    Path(TRAINING_PATH) / conf.weights, map_location="cpu"
+                )
+            else:
+                print("Weights not found")
+                print("Starting new checkpoint")
+
+        if state_dict:
+            if "disk" in state_dict:
+                model_sd = {}
+                for k, v in state_dict["disk"].items():
+                    parts = k.split(".")
+                    parts[3] = "sequence"
+                    parts[4] = (
+                        "0"
+                        if (parts[1] == "path_down" and parts[2]) == "0"
+                        else ("1" if parts[4] == "1" else "2")
+                    )
+                    model_sd[".".join(parts)] = v
+
+                missing_keys, unexpected_keys = self.load_state_dict(
+                    model_sd, strict=False
+                )
+            else:
+                model_sd = {}
+                for k, v in state_dict["model"].items():
+                    if k.split(".")[-1] == "inverse_T":
+                        model_sd[k.replace("extractor.", "")] = v
+                    else:
+                        model_sd[k.replace("extractor", "unet")] = v
+                missing_keys, unexpected_keys = self.load_state_dict(
+                    model_sd, strict=False
+                )
+            print(missing_keys)
+            print(unexpected_keys)
+
         self.val_matcher = CycleMatcher()
         # Turns training off for matcher
-        self.train_matcher.requires_grad_(False)
         self.ramp = 0
         self.eval_mode = True
 
@@ -352,21 +418,6 @@ class DISK(BaseModel):
 
         return keypoints, scores
 
-    def _unet(self, images):
-        features = [images]
-        for block in self.path_down:
-            features.append(block(features[-1]))
-
-        f_bot = features[-1]
-        features_horizontal = features[-2::-1]
-        for i, block in enumerate(self.path_up):
-            f_bot = block(f_bot, features_horizontal[i])
-
-        descriptors = f_bot[:, : self.conf.desc_dim]
-        heatmaps = f_bot[:, self.conf.desc_dim :]
-
-        return heatmaps, descriptors
-
     def get_heatmap_and_descriptors(self, data):
         images = data["image"]
         if self.conf.pad_if_not_divisible:
@@ -375,7 +426,9 @@ class DISK(BaseModel):
             pd_w = 16 - w % 16 if w % 16 > 0 else 0
             images = torch.nn.functional.pad(images, (0, pd_w, 0, pd_h), value=0.0)
 
-        heatmaps, descs = self._unet(images)
+        output = self.unet(images)
+        descs = output[:, : self.conf.desc_dim]
+        heatmaps = output[:, self.conf.desc_dim :]
 
         return heatmaps, descs
 
@@ -387,7 +440,9 @@ class DISK(BaseModel):
             pd_w = 16 - w % 16 if w % 16 > 0 else 0
             images = torch.nn.functional.pad(images, (0, pd_w, 0, pd_h), value=0.0)
 
-        heatmaps, descs = self._unet(images)
+        output = self.unet(images)
+        descs = output[:, : self.conf.desc_dim]
+        heatmaps = output[:, self.conf.desc_dim :]
 
         if self.eval_mode:
             points, logps = nms(heatmaps, self.conf.nms_radius)
