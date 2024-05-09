@@ -27,7 +27,7 @@ from .models import get_model
 from .settings import EVAL_PATH, TRAINING_PATH
 from .utils.experiments import get_best_checkpoint, get_last_checkpoint, save_experiment
 from .utils.stdout_capturing import capture_outputs
-from .utils.tensor import batch_to_device, map_tensor_filtered
+from .utils.tensor import batch_to_device, map_tensor_filtered, gather_tensor
 from .utils.tools import (
     AverageMetric,
     MedianMetric,
@@ -459,14 +459,12 @@ def training(rank, conf, output_dir, args):
                 for sloss in losses["total"]:
                     scaler.scale(sloss).backward(retain_graph=True)
 
-                leaves = [pred[k] for k in pred.keys() if filter_func(k)]
-                grads = [
-                    detached_pred[k].grad
-                    for k in detached_pred.keys()
-                    if filter_func(k)
-                ]
+                leaves = gather_tensor(pred, filter_func)
+                grads = gather_tensor(detached_pred, filter_func)
+                grads = [g.grad for g in grads]
 
-                torch.autograd.backward(leaves, grads)
+                torch.autograd.backward(leaves, grads, retain_graph=True)
+                del leaves, grads
 
                 if it % substep_ == substep_ - 1:
                     if args.detect_anomaly:
