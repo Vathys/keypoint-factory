@@ -26,34 +26,6 @@ def point_distribution(logits):
     return proposals, accept_mask, logp
 
 
-def nms(self, heatmaps, nms_radius=2):
-    heatmaps = heatmaps.squeeze(1)
-
-    ixs = torch.nn.functional.max_pool2d(
-        heatmaps,
-        kernel_size=2 * nms_radius + 1,
-        stride=1,
-        padding=nms_radius,
-        return_indices=True,
-    )[1]
-
-    h, w = heatmaps.shape[1:]
-    coords = torch.arange(h * w, device=heatmaps.device).reshape(1, h, w)
-    nms = ixs == coords
-
-    if self.conf.detection_threshold is not None:
-        nms = nms & (heatmaps > self.conf.detection_threshold)
-
-    keypoints = []
-    scores = []
-
-    for i in range(heatmaps.shape[0]):
-        keypoints.append(torch.flip(nms[i].nonzero(as_tuple=False), (1,)))
-        scores.append(heatmaps[i][nms[i]])
-
-    return keypoints, scores
-
-
 class ConsistentMatchDistribution:
     def __init__(
         self,
@@ -68,36 +40,23 @@ class ConsistentMatchDistribution:
             descriptors0,
             descriptors1,
         ).to(inverse_T.device)
-        affinity = -inverse_T * distances
 
+        affinity = -inverse_T * distances
         self._cat_I = torch.distributions.Categorical(logits=affinity)
-        if affinity.dim() == 2:
-            self._cat_T = torch.distributions.Categorical(logits=affinity.T)
-        else:
-            self._cat_T = torch.distributions.Categorical(
-                logits=affinity.permute(0, 2, 1)
-            )
+        self._cat_T = torch.distributions.Categorical(logits=affinity.transpose(1, 2))
 
         self._dense_logp = None
         self._dense_p = None
 
     def dense_p(self):
         if self._dense_p is None:
-            if self._cat_I.probs.dim() == 2:
-                self._dense_p = self._cat_I.probs * self._cat_T.probs.T
-            else:
-                self._dense_p = self._cat_I.probs * self._cat_T.probs.permute(0, 2, 1)
+            self._dense_p = self._cat_I.probs * self._cat_T.probs.transpose(1, 2)
 
         return self._dense_p
 
     def dense_logp(self):
         if self._dense_logp is None:
-            if self._cat_I.logits.dim() == 2:
-                self._dense_logp = self._cat_I.logits + self._cat_T.logits.T
-            else:
-                self._dense_logp = self._cat_I.logits + self._cat_T.logits.permute(
-                    0, 2, 1
-                )
+            self._dense_logp = self._cat_I.logits + self._cat_T.logits.transpose(1, 2)
 
         return self._dense_logp
 
@@ -151,6 +110,8 @@ class CycleMatcher:
             descriptors0,
             descriptors1,
         ).to(descriptors0.device)
+        if distances.dim() == 2:
+            distances = distances.unsqueeze(0)
 
         n_amin = torch.argmin(distances, dim=-1)
         m_amin = torch.argmin(distances, dim=-2)
@@ -167,7 +128,7 @@ class CycleMatcher:
                 )
             )
         matches = pad_and_stack(matches, None, -1, mode="constant", constant=-1)
-        return matches
+        return matches.transpose(1, 2)
 
 
 class Unet(torch.nn.Module):
@@ -370,7 +331,6 @@ class DISK(BaseModel):
         self.val_matcher = CycleMatcher()
         # Turns training off for matcher
         self.ramp = 0
-        self.eval_mode = True
 
     def _sample(self, heatmaps):
         v = self.conf.window_size
@@ -418,6 +378,33 @@ class DISK(BaseModel):
 
         return keypoints, scores
 
+    def _nms(self, heatmaps):
+        heatmaps = heatmaps.squeeze(1)
+
+        ixs = torch.nn.functional.max_pool2d(
+            heatmaps,
+            kernel_size=2 * self.conf.nms_radius + 1,
+            stride=1,
+            padding=self.conf.nms_radius,
+            return_indices=True,
+        )[1]
+
+        h, w = heatmaps.shape[1:]
+        coords = torch.arange(h * w, device=heatmaps.device).reshape(1, h, w)
+        nms = ixs == coords
+
+        if self.conf.detection_threshold is not None:
+            nms = nms & (heatmaps > self.conf.detection_threshold)
+
+        keypoints = []
+        scores = []
+
+        for i in range(heatmaps.shape[0]):
+            keypoints.append(torch.flip(nms[i].nonzero(as_tuple=False), (1,)))
+            scores.append(heatmaps[i][nms[i]])
+
+        return keypoints, scores
+
     def get_heatmap_and_descriptors(self, data):
         images = data["image"]
         if self.conf.pad_if_not_divisible:
@@ -444,10 +431,12 @@ class DISK(BaseModel):
         descs = output[:, : self.conf.desc_dim]
         heatmaps = output[:, self.conf.desc_dim :]
 
-        if self.eval_mode:
-            points, logps = nms(heatmaps, self.conf.nms_radius)
-        else:
+        if self.training:
+            # Use sampling during training
             points, logps = self._sample(heatmaps)
+        else:
+            # Use NMS during evaluation
+            points, logps = self._nms(heatmaps)
 
         keypoints = []
         scores = []
@@ -530,59 +519,82 @@ class DISK(BaseModel):
         reinforce = (elementwise_reward * sample_plogp).sum(dim=(1, 2))
         kp_penalty = self.conf.loss.lambda_kp * kpts_logp_flat
 
-        n_keypoints = torch.tensor(
-            logp0.shape[-1] + logp1.shape[-1], device=logp0.device
-        ).repeat(logp0.shape[0])
-        exp_n_pairs = sample_p.sum(dim=(1, 2))
-        exp_reward = (sample_p * elementwise_reward).sum(
-            dim=(1, 2)
-        ) + self.conf.loss.lambda_kp * n_keypoints
-
         loss = -reinforce - kp_penalty
 
-        if self.eval_mode:
-            n_kpts = torch.tensor(
-                pred["keypoints0"].shape[-1] + pred["keypoints1"].shape[-1],
-                device=pred["keypoints0"].device,
-            ).repeat(logp0.shape[0])
+        losses = {
+            "total": loss,
+        }
 
-            e_matches = self.val_matcher.match_features(pred)
+        if not self.training:
+            if pred["keypoints0"].shape[-2] == 0 or pred["keypoints1"].shape[-2] == 0:
+                zero = torch.zeros(pred["keypoints0"].shape[0], device=logp0.device)
+                metrics = {
+                    "n_kpts": zero,
+                    "n_pairs": zero,
+                    "n_good": zero,
+                    "n_bad": zero,
+                    "prec": zero,
+                    "reward": zero,
+                }
+            else:
+                n_kpts = torch.tensor(
+                    pred["keypoints0"].shape[-2] + pred["keypoints1"].shape[-2],
+                    device=pred["keypoints0"].device,
+                ).repeat(logp0.shape[0])
 
-            kpts0 = pred["keypoints0"].gather(1, e_matches)
-            kpts1 = pred["keypoints1"].gather(1, e_matches)
+                e_matches = self.val_matcher.match_features(pred)
+                kpts0 = pred["keypoints0"]
+                kpts1 = pred["keypoints1"]
+                valid_indices0 = (e_matches[:, :, 0] >= 0) & (
+                    e_matches[:, :, 0] < kpts0.shape[1]
+                )
+                valid_indices1 = (e_matches[:, :, 1] >= 0) & (
+                    e_matches[:, :, 1] < kpts1.shape[1]
+                )
+                kpts0 = kpts0.gather(
+                    1,
+                    e_matches[:, :, 0]
+                    .unsqueeze(-1)
+                    .masked_fill(~valid_indices0.unsqueeze(2), 0)
+                    .repeat(1, 1, 2),
+                )
+                kpts1 = kpts1.gather(
+                    1,
+                    e_matches[:, :, 1]
+                    .unsqueeze(-1)
+                    .masked_fill(~valid_indices1.unsqueeze(2), 0)
+                    .repeat(1, 1, 2),
+                )
 
-            n_pairs = e_matches.shape[1]
+                n_pairs = e_matches.shape[1]
 
-            good = classify_by_epipolar(
-                data, {"keypoints0": kpts0, "keypoints1": kpts1}
-            )
-            good = good.diagonal(dim1=-2, dim2=-1)
-            bad = ~good
+                good = classify_by_epipolar(
+                    data, {"keypoints0": kpts0, "keypoints1": kpts1}
+                )
+                good = good.diagonal(dim1=-2, dim2=-1)
+                bad = ~good
 
-            n_good = good.to(torch.int64).sum(dim=1)
-            n_bad = bad.to(torch.int64).sum(dim=1)
-            prec = n_good / (n_pairs + 1)
+                n_good = good.to(torch.int64).sum(dim=1)
+                n_bad = bad.to(torch.int64).sum(dim=1)
+                prec = n_good / (n_pairs + 1)
 
-            reward = (
-                self.conf.loss.lambda_tp * n_good
-                + self.conf.loss.lambda_fp * n_bad
-                + self.conf.loss.lambda_kp * n_kpts
-            )
+                reward = (
+                    self.conf.loss.lambda_tp * n_good
+                    + self.conf.loss.lambda_fp * n_bad
+                    + self.conf.loss.lambda_kp * n_kpts
+                )
 
-            metrics = {
-                "n_kpts": n_kpts,
-                "n_pairs": n_pairs,
-                "n_good": n_good,
-                "n_bad": n_bad,
-                "prec": prec,
-                "reward": reward,
-            }
+                n_pairs = torch.tensor([n_pairs] * kpts0.shape[0], device=kpts0.device)
+
+                metrics = {
+                    "n_kpts": n_kpts,
+                    "n_pairs": n_pairs,
+                    "n_good": n_good,
+                    "n_bad": n_bad,
+                    "prec": prec,
+                    "reward": reward,
+                }
         else:
             metrics = {}
 
-        return {
-            "total": loss,
-            "reward": exp_reward,
-            "n_keypoints": n_keypoints.float(),
-            "n_pairs": exp_n_pairs,
-        }, metrics
+        return losses, metrics

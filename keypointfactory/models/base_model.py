@@ -99,14 +99,6 @@ class BaseModel(nn.Module, metaclass=MetaModel):
         if self.conf.freeze_batch_normalization:
             self.apply(freeze_bn)
 
-        self.eval_mode = False
-        return self
-
-    def eval(self):
-        super().eval()
-
-        self.eval_mode = True
-
         return self
 
     def forward(self, data):

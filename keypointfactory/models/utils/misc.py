@@ -120,5 +120,19 @@ def distance_matrix(fs1, fs2):
     Assumes fs1 and fs2 are normalized!
     returns distance matrix of size N x M
     """
+    if fs1.numel() == 0:
+        # in case no points are detected
+        fs1 = torch.zeros(
+            (fs1.shape[0], 1, fs1.shape[2]),
+            device=fs1.device,
+        )
+
+    if fs2.numel() == 0:
+        # in case no points are detected
+        fs2 = torch.zeros(
+            (fs2.shape[0], 1, fs2.shape[2]),
+            device=fs2.device,
+        )
+
     dist = torch.einsum("...if,...jf->...ij", fs1, fs2)
     return 1.414213 * (1.0 - dist).clamp(min=1e-6).sqrt()
