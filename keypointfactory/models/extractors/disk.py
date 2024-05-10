@@ -40,6 +40,8 @@ class ConsistentMatchDistribution:
             descriptors0,
             descriptors1,
         ).to(inverse_T.device)
+        if distances.dim() == 2:
+            distances = distances.unsqueeze(0)
 
         affinity = -inverse_T * distances
         self._cat_I = torch.distributions.Categorical(logits=affinity)
@@ -193,7 +195,7 @@ def classify_by_epipolar(data, pred, threshold=2.0):
     if epi_1_0.dim() == 2:
         epi_1_0 = epi_1_0.unsqueeze(0)
 
-    return (epi_0_1 < threshold).permute(0, 2, 1) & (epi_1_0 < threshold)
+    return (epi_0_1 < threshold).transpose(1, 2) & (epi_1_0 < threshold)
 
 
 def classify_by_depth(data, pred, threshold=2.0):
