@@ -80,8 +80,10 @@ def asymm_epipolar_distance_all(p0, p1, F):
     Returns:
         The asymmetric epipolar distance of each point-pair: (..., N).
     """
-    if p0.shape[-2] == 0 or p1.shape[-2] == 0:
-        return torch.zeros(p0.shape[:-1]).to(p0)
+    if p0.shape[-2] == 0:
+        p0 = torch.zeros((*p0.shape[:-2], 1, p0.shape[-1])).to(p0)
+    if p1.shape[-2] == 0:
+        p1 = torch.zeros((*p1.shape[:-2], 1, p1.shape[-1])).to(p1)
     if p0.shape[-1] != 3:
         p0 = to_homogeneous(p0)
     if p1.shape[-1] != 3:
