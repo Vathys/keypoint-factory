@@ -69,6 +69,30 @@ class TwoViewPipeline(BaseModel):
             pred_i = {**pred_i, **self.extractor({**data_i, **pred_i})}
         return pred_i
 
+    def _pre_loss_callback(self, seed, epoch):
+        super()._pre_loss_callback(seed, epoch)
+
+        if self.conf.extractor.name:
+            self.extractor._pre_loss_callback(seed, epoch)
+        if self.conf.matcher.name:
+            self.matcher._pre_loss_callback(seed, epoch)
+        if self.conf.filter.name:
+            self.filter._pre_loss_callback(seed, epoch)
+        if self.conf.solver.name:
+            self.solver._pre_loss_callback(seed, epoch)
+
+    def _post_loss_callback(self, seed, epoch):
+        super()._post_loss_callback(seed, epoch)
+
+        if self.conf.extractor.name:
+            self.extractor._post_loss_callback(seed, epoch)
+        if self.conf.matcher.name:
+            self.matcher._post_loss_callback(seed, epoch)
+        if self.conf.filter.name:
+            self.filter._post_loss_callback(seed, epoch)
+        if self.conf.solver.name:
+            self.solver._post_loss_callback(seed, epoch)
+
     def _forward(self, data):
         pred0 = self.extract_view(data, "0")
         pred1 = self.extract_view(data, "1")

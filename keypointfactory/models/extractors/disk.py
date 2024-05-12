@@ -62,31 +62,31 @@ class ConsistentMatchDistribution:
 
         return self._dense_logp
 
-    def _select_cycle_consistent(self, left, right):
-        indexes = torch.arange(left.shape[0], device=left.device)
-        cycle_consistent = right[left] == indexes
+    # def _select_cycle_consistent(self, left, right):
+    #     indexes = torch.arange(left.shape[0], device=left.device)
+    #     cycle_consistent = right[left] == indexes
 
-        paired_left = left[cycle_consistent]
+    #     paired_left = left[cycle_consistent]
 
-        return torch.stack(
-            [
-                right[paired_left],
-                paired_left,
-            ],
-            dim=0,
-        )
+    #     return torch.stack(
+    #         [
+    #             right[paired_left],
+    #             paired_left,
+    #         ],
+    #         dim=0,
+    #     )
 
-    def sample(self):
-        samples_I = self._cat_I.sample()
-        samples_T = self._cat_T.sample()
+    # def sample(self):
+    #     samples_I = self._cat_I.sample()
+    #     samples_T = self._cat_T.sample()
 
-        return self._select_cycle_consistent(samples_I, samples_T)
+    #     return self._select_cycle_consistent(samples_I, samples_T)
 
-    def mle(self):
-        maxes_I = self._cat_I.logits.argmax(dim=1)
-        maxes_T = self._cat_T.logits.argmax(dim=1)
+    # def mle(self):
+    #     maxes_I = self._cat_I.logits.argmax(dim=1)
+    #     maxes_T = self._cat_T.logits.argmax(dim=1)
 
-        return self._select_cycle_consistent(maxes_I, maxes_T)
+    #     return self._select_cycle_consistent(maxes_I, maxes_T)
 
 
 class ConsistentMatcher(torch.nn.Module):
@@ -320,10 +320,7 @@ class DISK(BaseModel):
             else:
                 model_sd = {}
                 for k, v in state_dict["model"].items():
-                    if k.split(".")[-1] == "inverse_T":
-                        model_sd[k.replace("extractor.", "")] = v
-                    else:
-                        model_sd[k.replace("extractor", "unet")] = v
+                    model_sd[k.replace("extractor.", "")] = v
                 missing_keys, unexpected_keys = self.load_state_dict(
                     model_sd, strict=False
                 )
@@ -332,7 +329,9 @@ class DISK(BaseModel):
 
         self.val_matcher = CycleMatcher()
         # Turns training off for matcher
-        self.ramp = 0
+        self.lm_tp = self.conf.loss.lambda_tp
+        self.lm_fp = self.conf.loss.lambda_fp
+        self.lm_kp = self.conf.loss.lambda_kp
 
     def _sample(self, heatmaps):
         v = self.conf.window_size
@@ -485,21 +484,28 @@ class DISK(BaseModel):
 
     def _pre_loss_callback(self, seed, epoch):
         if epoch == 0:
-            self.ramp = 0
+            ramp = 0
         elif epoch == 1:
-            self.ramp = 0.1
+            ramp = 0.1
         else:
-            self.ramp = min(1.0, 0.1 + 0.2 * epoch)
+            ramp = min(1.0, 0.1 + 0.2 * epoch)
 
-        self.train_matcher.inverse_T = 15.0 + 35.0 * min(1.0, 0.05 * epoch)
+        self.lm_fp = self.conf.loss.lambda_fp * ramp
+        self.lm_kp = self.conf.loss.lambda_kp * ramp
+
+        updated_inverse_T = torch.tensor(15.0 + 35.0 * min(1.0, 0.05 * epoch))
+
+        self.train_matcher.inverse_T.copy_(updated_inverse_T)
+
+        # self.train_matcher.inverse_T = 15.0 + 35.0 * min(1.0, 0.05 * epoch)
 
     def loss(self, pred, data):
         elementwise_reward = depth_reward(
             data,
             pred,
             threshold=self.conf.loss.reward_threshold,
-            lm_tp=self.conf.loss.lambda_tp,
-            lm_fp=self.conf.loss.lambda_fp * self.ramp,
+            lm_tp=self.lm_tp,
+            lm_fp=self.lm_fp,
         )
 
         match_dist = self.train_matcher.match_pair(pred)
@@ -519,7 +525,7 @@ class DISK(BaseModel):
         sample_plogp = sample_p * (sample_logp + kpts_logp)
 
         reinforce = (elementwise_reward * sample_plogp).sum(dim=(1, 2))
-        kp_penalty = self.conf.loss.lambda_kp * kpts_logp_flat
+        kp_penalty = self.lm_kp * kpts_logp_flat
 
         loss = -reinforce - kp_penalty
 
@@ -581,9 +587,9 @@ class DISK(BaseModel):
                 prec = n_good / (n_pairs + 1)
 
                 reward = (
-                    self.conf.loss.lambda_tp * n_good
-                    + self.conf.loss.lambda_fp * n_bad
-                    + self.conf.loss.lambda_kp * n_kpts
+                    self.lm_tp * n_good
+                    + self.lm_fp * n_bad
+                    + self.lm_kp * n_kpts
                 )
 
                 n_pairs = torch.tensor([n_pairs] * kpts0.shape[0], device=kpts0.device)

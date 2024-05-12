@@ -46,6 +46,12 @@ class TripletPipeline(TwoViewPipeline):
 
         return pred
 
+    def _pre_loss_callback(self, seed, epoch):
+        super()._pre_loss_callback(seed, epoch)
+
+    def _post_loss_callback(self, seed, epoch):
+        super()._post_loss_callback(seed, epoch)
+
     def loss(self, pred, data):
         if not has_triplet(data):
             return super().loss(pred, data)
