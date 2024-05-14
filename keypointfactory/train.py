@@ -76,6 +76,8 @@ default_train_conf = {
 }
 default_train_conf = OmegaConf.create(default_train_conf)
 
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 
 @torch.no_grad()
 def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
@@ -461,7 +463,8 @@ def training(rank, conf, output_dir, args):
 
                 leaves = gather_tensor(pred, filter_func)
                 grads = gather_tensor(detached_pred, filter_func)
-                grads = [g.grad for g in grads]
+                leaves = [leaf for leaf in leaves if leaf.numel() > 0]
+                grads = [grad.grad for grad in grads if grad.numel() > 0]
 
                 torch.autograd.backward(leaves, grads, retain_graph=True)
                 del leaves, grads

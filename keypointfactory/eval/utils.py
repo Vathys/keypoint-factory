@@ -1,8 +1,7 @@
 import numpy as np
 import torch
-import warnings
 from kornia.geometry.homography import find_homography_dlt
-from scipy.stats import chi2, pearsonr
+import pandas as pd
 
 from ..geometry.epipolar import generalized_epi_dist, relative_pose_error
 from ..geometry.gt_generation import IGNORE_FEATURE
@@ -13,7 +12,7 @@ from ..geometry.homography import (
 )
 from ..geometry.utils import div0
 from ..robust_estimators import load_estimator
-from ..utils.tensor import index_batch
+from ..utils.tensor import index_batch, map_tensor
 from ..utils.tools import AUCMetric
 
 
@@ -23,74 +22,6 @@ def check_keys_recursive(d, pattern):
     else:
         for k in pattern:
             assert k in d.keys()
-
-
-# Transfer to another file later
-# Start to-transfer functions
-def get_rates(true, pred):
-    rates = {}
-    #    GT ->    True      False
-    #  || Pred
-    #  \/ True     TP        FP
-    #     False    FN        TN
-    rates["PPV"] = np.sum(true & pred, dtype=np.float64) / (
-        1e-8 + pred.sum()
-    )  # Positive predictive value (precision)
-    rates["TPR"] = np.sum(true & pred, dtype=np.float64) / (
-        1e-8 + true.sum()
-    )  # True positive rate (recall, sensitivity)
-    rates["FPR"] = np.sum(~true & pred, dtype=np.float64) / (
-        1e-8 + (~true).sum()
-    )  # False positive rate
-    rates["TNR"] = np.sum(~true & ~pred, dtype=np.float64) / (
-        1e-8 + (~true).sum()
-    )  # True negative rate (specificity)
-    return rates
-
-
-def get_pr_curve(true, score):
-    sorted_idx = np.argsort(score)
-    true = true[sorted_idx]
-    prec = []
-    rec = []
-    for i in range(1, len(true)):
-        pred = np.zeros_like(true)
-        pred[sorted_idx[:i]] = 1
-        vprec, vrec, _, _ = get_rates(true, pred).values()
-        prec.append(vprec)
-        rec.append(vrec)
-
-    return prec, rec
-
-
-def get_roc_curve(true, score):
-    sorted_idx = np.argsort(score)
-    true = true[sorted_idx]
-    fpr = []
-    tpr = []
-    for i in range(1, len(true)):
-        pred = np.zeros_like(true)
-        pred[sorted_idx[:i]] = 1
-        _, vtpr, vfpr, _ = get_rates(true, pred).values()
-        fpr.append(vfpr)
-        tpr.append(vtpr)
-
-    return fpr, tpr
-
-
-def calc_ap(prec_arr, rec_arr):
-    rec_arr = np.concatenate([[0], rec_arr, [1]])
-    prec_arr = np.concatenate([[0], prec_arr])
-    return np.sum((rec_arr[1:] - rec_arr[:-1]) * prec_arr)
-
-
-def calc_auc(fpr_arr, tpr_arr):
-    fpr_arr = np.concatenate([[0], fpr_arr, [1]])
-    tpr_arr = np.concatenate([[0], tpr_arr])
-    return np.sum((fpr_arr[1:] - fpr_arr[:-1]) * tpr_arr)
-
-
-# End to-transfer functions
 
 
 def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
@@ -117,6 +48,276 @@ def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
     }
 
 
+def get_metrics(
+    kpts0,
+    kpts1,
+    image0_shape,
+    image1_shape,
+    H,
+    thresh=3.0,
+    padding=4.0,
+    top_k=None,
+    top_by="scores",
+    return_sum=True,
+    kpts_scores0=None,
+    kpts_scores1=None,
+):
+    """
+    Computes a series of metrics from the keypoints and homography
+
+    Metrics Computed:
+    - Number of keypoints
+    - Number of covisible keypoints
+    - Number of covisible keypoints that are correct
+    - Localization error score which is an inverse of the distance between the closest
+      keypoints in the two views. The score is 0 if the distance is greater than the
+      threshold and 1 if the distance is 0.
+    - Repeatability which is the ratio of the number of correct covisible keypoints to
+      the number of covisible keypoints
+
+    Args:
+    - kpts0 (torch.Tensor): Keypoints in the first view
+    - kpts1 (torch.Tensor): Keypoints in the second view
+    - image0_shape (tuple): Shape of the first image
+    - image1_shape (tuple): Shape of the second image
+    - H (torch.Tensor): Homography matrix
+    - thresh (float): Threshold for correctness
+    - padding (float): Padding for the keypoints
+    - top_k (int): Number of top keypoints to consider
+    - top_by (str): Method to select top keypoints. Can be either "scores"
+      (needs the kpts_scores{0,1}) or "dist"
+    - return_sum (bool): Whether to sum the metrics for both views, or only
+      for the second view
+    - kpts_scores0 (torch.Tensor): Keypoint scores for the first image
+    - kpts_scores1 (torch.Tensor): Keypoint scores for the second image
+    """
+    return_dict = {}
+
+    if top_k is not None:
+        if kpts_scores0 is None or kpts_scores1 is None:
+            raise ValueError("kpts_scores0 and kpts_scores1 must be provided")
+
+        if top_by == "scores":
+            idxs0 = torch.argsort(kpts_scores0, descending=True)[:top_k]
+            idxs1 = torch.argsort(kpts_scores1, descending=True)[:top_k]
+
+            kpts0 = kpts0[idxs0]
+            kpts1 = kpts1[idxs1]
+        elif top_by == "dist":
+            kpts0_1 = warp_points_torch(kpts0, H, inverse=False)
+            kpts1_0 = warp_points_torch(kpts1, H, inverse=True)
+
+            dists = torch.norm(kpts0_1[:, None] - kpts1[None], dim=-1)
+            idxs0 = torch.argsort(dists.min(dim=1)[0], descending=False)[:top_k]
+            dists = torch.norm(kpts1_0[:, None] - kpts0[None], dim=-1)
+            idxs1 = torch.argsort(dists.min(dim=1)[0], descending=False)[:top_k]
+
+            kpts0 = kpts0[idxs0]
+            kpts1 = kpts1[idxs1]
+
+            del dists
+
+    kpts0_1 = warp_points_torch(kpts0.double(), H.double(), inverse=False)
+    kpts1_0 = warp_points_torch(kpts1.double(), H.double(), inverse=True)
+
+    metrics = compute_correctness(kpts0, kpts1, kpts0_1, kpts1_0, thresh, True)
+
+    vis0 = torch.all(
+        (kpts0_1 >= padding) & (kpts0_1 < (image1_shape - padding)),
+        dim=-1,
+    )
+    vis1 = torch.all(
+        (kpts1_0 >= padding) & (kpts1_0 < (image0_shape - padding)),
+        dim=-1,
+    )
+
+    correct0 = metrics["correct0"][vis0]
+    correct1 = metrics["correct1"][vis1]
+
+    dist0 = metrics["dist0"][vis0]
+    dist1 = metrics["dist1"][vis1]
+
+    score0 = torch.max(1 - (dist0 / thresh), torch.tensor(0.0))
+    score1 = torch.max(1 - (dist1 / thresh), torch.tensor(0.0))
+
+    if return_sum:
+        return_dict["num_keypoints"] = torch.tensor(kpts0.shape[0] + kpts1.shape[0])
+        return_dict["num_covisible"] = vis0.sum() + vis1.sum()
+        return_dict["num_covisible_correct"] = correct0.sum() + correct1.sum()
+        return_dict["localization_score"] = score0.sum() + score1.sum()
+        return_dict["repeatability"] = div0(
+            correct0.sum() + correct1.sum(), vis0.sum() + vis1.sum()
+        ).float()
+    else:
+        return_dict["num_keypoints"] = torch.tensor(kpts1.shape[0])
+        return_dict["num_covisible"] = vis1.sum()
+        return_dict["num_covisible_correct"] = correct1.sum()
+        return_dict["localization_score"] = score1.sum()
+        return_dict["repeatability"] = div0(correct1.sum(), vis1.sum()).float()
+
+    return return_dict
+
+
+def calc_pair_metrics(
+    data,
+    pred,
+    eval_to_0=False,
+    only_eval_second=False,
+    top_k=None,
+    top_by="scores",
+    thresh=3.0,
+    padding=4.0,
+):
+    """
+    Gets metrics per pair of images in a scene. If there are multiple transformations
+    between the two images, the metrics are computed for each transformation. If the
+    eval_to_0 flag is set to True, the metrics are computed with respect to the first
+    transformation for both images.
+
+    Args:
+    - data: A dictionary containing the data for the pair of images
+    - pred: A dictionary containing the predictions for the pair of images
+    - top_k: The number of top keypoints to consider. If None, all keypoints are
+      considered.
+    - eval_to_0: A boolean flag that determines if the metrics are computed with respect
+      to the first transformation
+    - thresh: The threshold for the correctness and localization error score.
+
+    Returns:
+    - A DataFrame containing the metrics for each transformation. If eval_to_0 is True,
+      the DataFrame will contain an additional column for the image.
+    """
+    image0 = data["view0"]["image"].permute(1, 2, 0)
+    image1 = data["view1"]["image"].permute(1, 2, 0)
+    H = data["H_0to1"]
+
+    return_list = []
+
+    def untorch(x):
+        if torch.is_tensor(x):
+            return x.item() if torch.numel(x) == 1 else x.numpy()
+        return x
+
+    if not isinstance(pred["keypoints0"], dict):
+        metric_dict = get_metrics(
+            pred["keypoints0"],
+            pred["keypoints1"],
+            torch.tensor(image0.shape[:2][::-1]),
+            torch.tensor(image1.shape[:2][::-1]),
+            H,
+            thresh,
+            padding,
+            top_k=top_k,
+            top_by=top_by,
+            kpts_scores0=pred["keypoint_scores0"],
+            kpts_scores1=pred["keypoint_scores1"],
+        )
+
+        return_list.append(map_tensor(metric_dict, untorch))
+    else:
+        if eval_to_0:
+            bmat0 = pred["transform0"]["0"]
+            bmat1 = pred["transform1"]["0"]
+            bdsize0 = pred["dsize0"]["0"]
+            bdsize1 = pred["dsize1"]["0"]
+            # print(pred["transform_id"]["0"])
+
+            bkpts0 = pred["keypoints0"]["0"]
+            bkpts1 = pred["keypoints1"]["0"]
+            bkpts_scores0 = pred["keypoint_scores0"]["0"]
+            bkpts_scores1 = pred["keypoint_scores1"]["0"]
+
+            for i in range(len(pred["keypoints0"])):
+                index = str(i)
+                if not only_eval_second:
+
+                    tmat0 = pred["transform0"][index]
+                    dsize0 = pred["dsize0"][index]
+                    H0 = tmat0.inverse() @ bmat0
+
+                    kpts0 = pred["keypoints0"][index]
+                    kpts_scores0 = pred["keypoint_scores0"][index]
+
+                    metric_dict0 = get_metrics(
+                        bkpts0,
+                        kpts0,
+                        bdsize0.flip(0),
+                        dsize0.flip(0),
+                        H0,
+                        thresh,
+                        padding,
+                        return_sum=False,
+                        top_k=top_k,
+                        top_by=top_by,
+                        kpts_scores0=bkpts_scores0,
+                        kpts_scores1=kpts_scores0,
+                    )
+                    metric_dict0["transform"] = pred["transform_id"][index]
+                    metric_dict0["image"] = torch.tensor(0)
+                    return_list.append(map_tensor(metric_dict0, untorch))
+
+                tmat1 = pred["transform1"][index]
+                dsize1 = pred["dsize1"][index]
+
+                H1 = tmat1.inverse() @ bmat1
+
+                kpts1 = pred["keypoints1"][index]
+                kpts_scores1 = pred["keypoint_scores1"][index]
+
+                metric_dict1 = get_metrics(
+                    bkpts1,
+                    kpts1,
+                    bdsize1.flip(0),
+                    dsize1.flip(0),
+                    H1,
+                    thresh,
+                    padding,
+                    return_sum=False,
+                    top_k=top_k,
+                    top_by=top_by,
+                    kpts_scores0=bkpts_scores1,
+                    kpts_scores1=kpts_scores1,
+                )
+                metric_dict1["transform"] = pred["transform_id"][index]
+                metric_dict1["image"] = torch.tensor(1)
+                return_list.append(map_tensor(metric_dict1, untorch))
+        else:
+            for i in range(len(pred["keypoints0"])):
+                index = str(i)
+                tmat0 = pred["transform0"][index]
+                dsize0 = pred["dsize0"][index]
+                tmat1 = pred["transform1"][index]
+                dsize1 = pred["dsize1"][index]
+
+                H_new = tmat1 @ H @ tmat0.inverse()
+
+                kpts0 = pred["keypoints0"][index]
+                kpts1 = pred["keypoints1"][index]
+                kpts_scores0 = pred["keypoint_scores0"][index]
+                kpts_scores1 = pred["keypoint_scores1"][index]
+
+                metric_dict = get_metrics(
+                    kpts0,
+                    kpts1,
+                    dsize0.flip(0),
+                    dsize1.flip(0),
+                    H_new,
+                    thresh,
+                    padding,
+                    top_k=top_k,
+                    top_by=top_by,
+                    kpts_scores0=kpts_scores0,
+                    kpts_scores1=kpts_scores1,
+                )
+                metric_dict["transform"] = pred["transform_id"][index]
+                return_list.append(map_tensor(metric_dict, untorch))
+
+    pair_df = pd.DataFrame.from_records(return_list)
+    pair_df["name"] = data["name"][0]
+
+    return pair_df
+
+
 def get_matches_scores(kpts0, kpts1, matches0, mscores0):
     m0 = matches0 > -1
     m1 = matches0[m0]
@@ -134,114 +335,6 @@ def eval_per_batch_item(data: dict, pred: dict, eval_f, *args, **kwargs):
     ]
     # Return a dictionary of lists with the evaluation of each item
     return {k: [r[k] for r in results] for k in results[0].keys()}
-
-
-def eval_keypoints_homography(
-    data, pred, correctness_thresh=3.0, top_kpts=200, mutual=True
-):
-    check_keys_recursive(data, ["H_0to1"])
-    check_keys_recursive(pred, ["keypoints0", "keypoints1", "matches0", "matches1"])
-
-    H_gt = data["H_0to1"]
-    if H_gt.ndim > 2:
-        return eval_per_batch_item(data, pred, eval_keypoints_homography)
-
-    image0 = data["view0"]["image"].permute(1, 2, 0)
-    image1 = data["view1"]["image"].permute(1, 2, 0)
-
-    kpts0 = pred["keypoints0"]
-    kpts1 = pred["keypoints1"]
-    kpts_scores0 = pred["keypoint_scores0"]
-    kpts_scores1 = pred["keypoint_scores1"]
-
-    kpts0_1 = warp_points_torch(kpts0, H_gt, inverse=False)
-    kpts1_0 = warp_points_torch(kpts1, H_gt, inverse=True)
-
-    vis0 = torch.all(
-        (kpts0_1 >= 0) & (kpts0_1 <= torch.tensor(image1.shape[:2][::-1])), dim=-1
-    )
-    vis1 = torch.all(
-        (kpts1_0 >= 0) & (kpts1_0 <= torch.tensor(image0.shape[:2][::-1])), dim=-1
-    )
-
-    cor_dict = compute_correctness(
-        kpts0, kpts1, kpts0_1, kpts1_0, thresh=correctness_thresh, mutual=mutual
-    )
-    dist0 = cor_dict["dist0"]
-    dist1 = cor_dict["dist1"]
-    correct0 = cor_dict["correct0"]
-    correct1 = cor_dict["correct1"]
-    ddescriptors0 = torch.norm(
-        pred["descriptors0"] - pred["descriptors1"][cor_dict["matches0"]], p=2, dim=1
-    )
-    ddescriptors1 = torch.norm(
-        pred["descriptors1"] - pred["descriptors0"][cor_dict["matches1"]], p=2, dim=1
-    )
-
-    results = {}
-
-    fpr_arr0, tpr_arr0 = get_roc_curve(correct0[vis0].numpy(), kpts_scores0[vis0])
-    fpr_arr1, tpr_arr1 = get_roc_curve(correct1[vis1].numpy(), kpts_scores1[vis1])
-
-    auc0 = calc_auc(fpr_arr0, tpr_arr0)
-    auc1 = calc_auc(fpr_arr1, tpr_arr1)
-
-    results["roc_auc"] = (auc0 + auc1) / 2
-
-    prec_arr0, rec_arr0 = get_pr_curve(correct0[vis0].numpy(), kpts_scores0[vis0])
-    prec_arr1, rec_arr1 = get_pr_curve(correct1[vis1].numpy(), kpts_scores1[vis1])
-
-    ap0 = calc_ap(prec_arr0, rec_arr0)
-    ap1 = calc_ap(prec_arr1, rec_arr1)
-
-    results["ap"] = (ap0 + ap1) / 2
-
-    # We take the minimum of the two lengths to avoid out of bounds errors
-    ntop_kpts = min(
-        top_kpts,
-        len(prec_arr0) - 1,
-        len(prec_arr1) - 1,
-        len(rec_arr0) - 1,
-        len(rec_arr1) - 1,
-    )
-    if ntop_kpts != top_kpts:
-        warnings.warn(
-            "Not enough keypoints to compare between images. "
-            + f"Replacing {top_kpts} with {ntop_kpts}.",
-            RuntimeWarning,
-        )
-    results[f"prec@{top_kpts}pts"] = (prec_arr0[ntop_kpts] + prec_arr1[ntop_kpts]) / 2
-
-    results[f"recall@{top_kpts}pts"] = (rec_arr0[ntop_kpts] + rec_arr1[ntop_kpts]) / 2
-
-    results["loc_err"] = (
-        dist0[vis0 & correct0].mean() + dist1[vis1 & correct1].mean()
-    ) / 2
-
-    dd_corr0, dd_corr_p0 = pearsonr(torch.log(dist0[vis0]), ddescriptors0[vis0])
-
-    dd_corr1, dd_corr_p1 = pearsonr(torch.log(dist1[vis1]), ddescriptors1[vis1])
-
-    # Sometimes p-values are interpreted as 0 throwing divide by 0 errors
-    # I think, we can safely ignore these cases
-    with np.errstate(divide="ignore"):
-        fisher_score = -2 * (np.log(dd_corr_p0) + np.log(dd_corr_p1))
-
-    results["ddescriptor_corr"] = (dd_corr0 + dd_corr1) / 2
-    # We combine the p-values using Fisher's method
-    # Resulting score is chi2 distributed with 2k degrees of freedom
-    # where k is the number of p-values.
-    results["ddescriptor_corr_pval"] = chi2.sf(fisher_score, 4)
-
-    results["repeatability"] = (
-        div0(correct0[vis0].sum() + correct1[vis1].sum(), vis0.sum() + vis1.sum())
-        .float()
-        .item()
-    )
-    results["num_correct"] = (
-        correct0[vis0].sum().item() + correct1[vis1].sum().item()
-    ) / 2
-    return results
 
 
 def eval_matches_epipolar(data: dict, pred: dict) -> dict:

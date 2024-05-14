@@ -478,6 +478,7 @@ class DISK(BaseModel):
 
         return {
             "keypoints": keypoints.float(),
+            "heatmap": heatmaps,
             "keypoint_scores": scores.float(),
             "descriptors": descriptors.float(),
         }
