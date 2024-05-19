@@ -442,14 +442,14 @@ def training(rank, conf, output_dir, args):
                     filter_func,
                 )
                 losses, _ = loss_fn(detached_pred, data)
-                loss = torch.mean(losses["total"])
+                loss = torch.sum(losses["total"])
                 model._post_loss_callback(conf.train.seed, epoch)
             if torch.isnan(loss).any():
                 print(f"Detected NAN, skipping iteration {it}")
                 del pred, data, loss, losses
                 continue
 
-            do_backward = loss.requires_grad
+            do_backward = losses["total"].requires_grad
             if args.distributed:
                 do_backward = torch.tensor(do_backward).float().to(device)
                 torch.distributed.all_reduce(

@@ -1,4 +1,5 @@
 import torch
+from ...geometry.depth import sample_depth, project
 
 
 @torch.no_grad()
@@ -48,3 +49,37 @@ def matcher_metrics(pred, data, prefix="", prefix_gt=None):
         f"{prefix}average_precision": ap,
     }
     return metrics
+
+
+def compute_correct_depth(data, pred, thresh=3.0):
+    kpts0 = pred["keypoints0"]  # [B, N, 2]
+    kpts1 = pred["keypoints1"]  # [B, M, 2]
+
+    depth0 = data["view0"]["depth"]
+    depth1 = data["view1"]["depth"]
+    cam0 = data["view0"]["camera"]
+    cam1 = data["view1"]["camera"]
+    T0_1 = data["T_0to1"]
+    T1_0 = data["T_1to0"]
+
+    d0, valid0 = sample_depth(kpts0, depth0)
+    d1, valid1 = sample_depth(kpts1, depth1)
+
+    kpts0_1, visible0 = project(
+        kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 3.0
+    )  # [B, M, 2]
+    kpts1_0, visible1 = project(
+        kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 3.0
+    )  # [B, N, 2]
+    mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
+
+    dist0 = torch.norm(kpts0_1[:, :, None, :] - kpts1[:, None, :, :], dim=-1)
+    dist1 = torch.norm(kpts0[:, :, None, :] - kpts1_0[:, None, :, :], dim=-1)
+    dist = torch.max(dist0, dist1)
+    inf = dist.new_tensor(float("inf"))
+    dist = torch.where(mask_visible, dist, inf)
+
+    correct0 = dist.min(-1).values < 3.0
+    correct1 = dist.min(-2).values < 3.0
+
+    return correct0, correct1

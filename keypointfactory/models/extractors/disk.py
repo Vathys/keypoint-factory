@@ -5,7 +5,10 @@ from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
 from ..utils.blocks import get_module
 from ..utils.misc import pad_and_stack, distance_matrix
-from ...geometry.epipolar import T_to_F, asymm_epipolar_distance_all
+from ...geometry.epipolar import (
+    T_to_F,
+    asymm_epipolar_distance_all,
+)
 from ...geometry.depth import sample_depth, project
 
 
@@ -104,7 +107,69 @@ class ConsistentMatcher(torch.nn.Module):
 
 
 class CycleMatcher:
-    def match_features(self, pred):
+    def match_by_depth(self, data, pred):
+        kpts0 = pred["keypoints0"]  # [B, N, 2]
+        kpts1 = pred["keypoints1"]  # [B, M, 2]
+
+        depth0 = data["view0"]["depth"]
+        depth1 = data["view1"]["depth"]
+        cam0 = data["view0"]["camera"]
+        cam1 = data["view1"]["camera"]
+        T0_1 = data["T_0to1"]
+        T1_0 = data["T_1to0"]
+
+        d0, valid0 = sample_depth(kpts0, depth0)
+        d1, valid1 = sample_depth(kpts1, depth1)
+
+        kpts0_1, visible0 = project(
+            kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 3.0
+        )  # [B, M, 2]
+        kpts1_0, visible1 = project(
+            kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 3.0
+        )  # [B, N, 2]
+        mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
+
+        dist0 = torch.norm(kpts0_1[:, :, None, :] - kpts1[:, None, :, :], dim=-1)
+        dist1 = torch.norm(kpts0[:, :, None, :] - kpts1_0[:, None, :, :], dim=-1)
+        dist = torch.max(dist0, dist1)
+        inf = dist.new_tensor(float("inf"))
+        dist = torch.where(mask_visible, dist, inf)
+
+        min0 = dist.min(-1).indices
+        min1 = dist.min(-2).indices
+        ismin0 = torch.zeros(dist.shape, dtype=torch.bool, device=dist.device)
+        ismin1 = ismin0.clone()
+
+        ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
+        ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
+        positive = ismin0 & ismin1
+        validm0 = positive.any(-1)
+        validm1 = positive.any(-2)
+
+        unmatched0 = min0.new_tensor(-1)
+        m0 = torch.where(validm0, min0, unmatched0)
+        m1 = torch.where(validm1, min1, unmatched0)
+
+        matches = []
+        for b in range(kpts0.shape[0]):
+            cyclical0 = (
+                m1[b][m0[b][validm0[b]]] == torch.arange(m0[b].shape[0])[validm0[b]]
+            )
+
+            matches.append(
+                torch.stack(
+                    [
+                        torch.arange(m0.shape[1], device=m0.device)[validm0[b]][
+                            cyclical0
+                        ],
+                        m0[b][validm0[b]][cyclical0],
+                    ]
+                )
+            )
+        matches = pad_and_stack(matches, None, -1, mode="constant", constant=-1)
+        return matches.transpose(1, 2)
+
+    def match_by_descriptors(self, pred):
         descriptors0 = pred["descriptors0"]
         descriptors1 = pred["descriptors1"]
 
@@ -134,6 +199,7 @@ class CycleMatcher:
 
 
 class Unet(torch.nn.Module):
+
     def __init__(self, in_features, down, up, conf):
         super(Unet, self).__init__()
 
@@ -532,6 +598,8 @@ class DISK(BaseModel):
 
         losses = {
             "total": loss,
+            "reinforce": -reinforce,
+            "kp_penalty": -kp_penalty,
         }
 
         if not self.training:
@@ -551,58 +619,73 @@ class DISK(BaseModel):
                     device=pred["keypoints0"].device,
                 ).repeat(logp0.shape[0])
 
-                e_matches = self.val_matcher.match_features(pred)
-                kpts0 = pred["keypoints0"]
-                kpts1 = pred["keypoints1"]
-                valid_indices0 = (e_matches[:, :, 0] >= 0) & (
-                    e_matches[:, :, 0] < kpts0.shape[1]
-                )
-                valid_indices1 = (e_matches[:, :, 1] >= 0) & (
-                    e_matches[:, :, 1] < kpts1.shape[1]
-                )
-                kpts0 = kpts0.gather(
-                    1,
-                    e_matches[:, :, 0]
-                    .unsqueeze(-1)
-                    .masked_fill(~valid_indices0.unsqueeze(2), 0)
-                    .repeat(1, 1, 2),
-                )
-                kpts1 = kpts1.gather(
-                    1,
-                    e_matches[:, :, 1]
-                    .unsqueeze(-1)
-                    .masked_fill(~valid_indices1.unsqueeze(2), 0)
-                    .repeat(1, 1, 2),
-                )
+                def get_match_metrics(kpts0, kpts1, matches):
+                    valid_indices0 = (matches[:, :, 0] >= 0) & (
+                        matches[:, :, 0] < kpts0.shape[1]
+                    )
+                    valid_indices1 = (matches[:, :, 1] >= 0) & (
+                        matches[:, :, 1] < kpts1.shape[1]
+                    )
+                    kpts0 = kpts0.gather(
+                        1,
+                        matches[:, :, 0]
+                        .unsqueeze(-1)
+                        .masked_fill(~valid_indices0.unsqueeze(2), 0)
+                        .repeat(1, 1, 2),
+                    )
+                    kpts1 = kpts1.gather(
+                        1,
+                        matches[:, :, 1]
+                        .unsqueeze(-1)
+                        .masked_fill(~valid_indices1.unsqueeze(2), 0)
+                        .repeat(1, 1, 2),
+                    )
 
-                n_pairs = e_matches.shape[1]
+                    n_pairs = matches.shape[1]
 
-                good = classify_by_epipolar(
-                    data, {"keypoints0": kpts0, "keypoints1": kpts1}
-                )
-                good = good.diagonal(dim1=-2, dim2=-1)
-                bad = ~good
+                    good = classify_by_epipolar(
+                        data, {"keypoints0": kpts0, "keypoints1": kpts1}
+                    )
+                    good = good.diagonal(dim1=-2, dim2=-1)
+                    bad = ~good
 
-                n_good = good.to(torch.int64).sum(dim=1)
-                n_bad = bad.to(torch.int64).sum(dim=1)
-                prec = n_good / (n_pairs + 1)
+                    n_good = good.to(torch.int64).sum(dim=1)
+                    n_bad = bad.to(torch.int64).sum(dim=1)
+                    prec = n_good / (n_pairs + 1)
 
-                reward = (
-                    self.lm_tp * n_good
-                    + self.lm_fp * n_bad
-                    + self.lm_kp * n_kpts
-                )
+                    reward = (
+                        self.lm_tp * n_good + self.lm_fp * n_bad + self.lm_kp * n_kpts
+                    )
 
-                n_pairs = torch.tensor([n_pairs] * kpts0.shape[0], device=kpts0.device)
+                    n_pairs = torch.tensor(
+                        [n_pairs] * kpts0.shape[0], device=kpts0.device
+                    )
+                    return {
+                        "n_pairs": n_pairs,
+                        "n_good": n_good,
+                        "n_bad": n_bad,
+                        "prec": prec,
+                        "reward": reward,
+                    }
 
                 metrics = {
                     "n_kpts": n_kpts,
-                    "n_pairs": n_pairs,
-                    "n_good": n_good,
-                    "n_bad": n_bad,
-                    "prec": prec,
-                    "reward": reward,
                 }
+
+                desc_matches = self.val_matcher.match_by_descriptors(pred)
+                depth_matches = self.val_matcher.match_by_depth(data, pred)
+                kpts0 = pred["keypoints0"]
+                kpts1 = pred["keypoints1"]
+
+                desc_metrics = get_match_metrics(kpts0, kpts1, desc_matches)
+                depth_metrics = get_match_metrics(kpts0, kpts1, depth_matches)
+
+                metrics = {
+                    **metrics,
+                    **{"desc_" + k: v for k, v in desc_metrics.items()},
+                    **{"depth_" + k: v for k, v in depth_metrics.items()},
+                }
+
         else:
             metrics = {}
 
