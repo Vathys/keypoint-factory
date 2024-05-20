@@ -612,7 +612,9 @@ class DISK(BaseModel):
 
         if not self.training:
             if pred["keypoints0"].shape[-2] == 0 or pred["keypoints1"].shape[-2] == 0:
-                zero = torch.zeros(pred["keypoints0"].shape[0], device=logp0.device)
+                zero = torch.zeros(
+                    pred["keypoints0"].shape[0], device=pred["keypoints0"].device
+                )
                 metrics = {
                     "n_kpts": zero,
                     "n_pairs": zero,
@@ -625,7 +627,7 @@ class DISK(BaseModel):
                 n_kpts = torch.tensor(
                     pred["keypoints0"].shape[-2] + pred["keypoints1"].shape[-2],
                     device=pred["keypoints0"].device,
-                ).repeat(logp0.shape[0])
+                ).repeat(pred["keypoints0"].shape[0])
 
                 def get_match_metrics(kpts0, kpts1, matches):
                     valid_indices0 = (matches[:, :, 0] >= 0) & (
