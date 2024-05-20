@@ -153,7 +153,8 @@ class CycleMatcher:
         matches = []
         for b in range(kpts0.shape[0]):
             cyclical0 = (
-                m1[b][m0[b][validm0[b]]] == torch.arange(m0[b].shape[0])[validm0[b]]
+                m1[b][m0[b][validm0[b]]]
+                == torch.arange(m0[b].shape[0], device=m0.device)[validm0[b]]
             )
 
             matches.append(
