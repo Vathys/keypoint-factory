@@ -587,12 +587,10 @@ class DISK(BaseModel):
 
         kpts_logp = logp0[:, :, None] + logp1[:, None, :]
 
-        kpts_logp_flat = logp0.sum(dim=1) + logp1.sum(dim=1)
-
-        sample_plogp = sample_p * (sample_logp + kpts_logp)
-
-        reinforce = (elementwise_reward * sample_plogp).sum(dim=(1, 2))
-        kp_penalty = self.lm_kp * kpts_logp_flat
+        reinforce = (elementwise_reward * sample_p * (sample_logp + kpts_logp)).sum(
+            dim=(1, 2)
+        )
+        kp_penalty = self.lm_kp * (logp0.sum(dim=1) + logp1.sum(dim=1))
 
         loss = -reinforce - kp_penalty
 
@@ -601,6 +599,16 @@ class DISK(BaseModel):
             "reinforce": -reinforce,
             "kp_penalty": -kp_penalty,
         }
+        del (
+            logp0,
+            logp1,
+            sample_p,
+            sample_logp,
+            kpts_logp,
+            reinforce,
+            kp_penalty,
+            loss,
+        )
 
         if not self.training:
             if pred["keypoints0"].shape[-2] == 0 or pred["keypoints1"].shape[-2] == 0:
@@ -685,7 +693,6 @@ class DISK(BaseModel):
                     **{"desc_" + k: v for k, v in desc_metrics.items()},
                     **{"depth_" + k: v for k, v in depth_metrics.items()},
                 }
-
         else:
             metrics = {}
 
