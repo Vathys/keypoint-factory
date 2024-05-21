@@ -61,16 +61,19 @@ class ImagePairs(BaseDataset, torch.utils.data.Dataset):
 
     def _read_view(self, name):
         img_path = DATA_PATH / self.conf.root / "images" / name
-        depth_path = DATA_PATH / self.conf.root / "depths" / name
+        depth_path = DATA_PATH / self.conf.root / "depths" / name.replace(".jpg", ".h5")
+        
         img = load_image(img_path)
+        data = self.preprocessor(img)
+
         if depth_path.exists():
             with h5py.File(str(depth_path), "r") as f:
                 depth = f["/depth"].__array__().astype(np.float32, copy=False)
                 depth = torch.Tensor(depth)[None]
             assert depth.shape[-2:] == img.shape[-2:]
-
-        data = self.preprocessor(img)
-        data["depth"] = self.preprocesor(depth, interpolation="nearest")["image"][0]
+            data["depth"] = self.preprocessor(depth, interpolation="nearest")["image"][
+                0
+            ]
 
         return data
 

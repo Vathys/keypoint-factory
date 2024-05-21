@@ -1,12 +1,11 @@
 import logging
 import zipfile
 from collections import defaultdict
-from collections.abc import Iterable
 from pathlib import Path
 from pprint import pprint
 
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -15,10 +14,13 @@ from ..datasets import get_dataset
 from ..models.cache_loader import CacheLoader
 from ..settings import DATA_PATH, EVAL_PATH
 from ..utils.export_predictions import export_predictions
-from ..visualization.viz2d import plot_cumulative
+from ..utils.tensor import map_tensor
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
-from .utils import eval_matches_epipolar, eval_poses, eval_relative_pose_robust
+from .utils import (
+    eval_pair_depth,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +42,10 @@ class MegaDepth1500Pipeline(EvalPipeline):
             }
         },
         "eval": {
-            "estimator": "poselib",
-            "ransac_th": 1.0,  # -1 runs a bunch of thresholds and selects the best
+            "correctness_threshold": 3.0,
+            "padding": 4.0,
+            "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
+            "top_k_by": "scores",  # either "scores" or "distances", or list of both
         },
     }
 
@@ -88,63 +92,74 @@ class MegaDepth1500Pipeline(EvalPipeline):
 
     def run_eval(self, loader, pred_file):
         """Run the eval on cached predictions"""
-        conf = self.conf.eval
+        assert pred_file.exists()
         results = defaultdict(list)
-        test_thresholds = (
-            ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
-            if not isinstance(conf.ransac_th, Iterable)
-            else conf.ransac_th
-        )
-        pose_results = defaultdict(lambda: defaultdict(list))
+        conf = self.conf.eval
+
+        if isinstance(conf.top_k_thresholds, int):
+            conf.top_k_thresholds = [conf.top_k_thresholds]
+        if isinstance(conf.top_k_by, str):
+            conf.top_k_by = [conf.top_k_by]
+
+        df_list = []
         cache_loader = CacheLoader({"path": str(pred_file), "collate": None}).eval()
         for i, data in enumerate(tqdm(loader)):
+            assert "depth" in data["view0"]
             pred = cache_loader(data)
-            # add custom evaluations here
-            results_i = eval_matches_epipolar(data, pred)
-            for th in test_thresholds:
-                pose_results_i = eval_relative_pose_robust(
-                    data,
-                    pred,
-                    {"estimator": conf.estimator, "ransac_th": th},
+            data = map_tensor(data, lambda x: torch.squeeze(x, dim=0))
+            scene_name = data["name"][0].split("-")[0]
+            for top_k in conf.top_k_thresholds:
+                for top_by in conf.top_k_by:
+                    pair_metrics = eval_pair_depth(
+                        data,
+                        pred,
+                        eval_to_0=False,
+                        top_k=int(top_k),
+                        top_by=top_by,
+                        thresh=conf.correctness_threshold,
+                        padding=conf.padding,
+                    )
+
+                    pair_metrics["top_k"] = top_k
+                    pair_metrics["top_by"] = top_by
+                    pair_metrics["scene"] = scene_name
+                    df_list.append(pair_metrics)
+
+        results = pd.concat(df_list)
+        
+        results["repeatability"] = results["num_covisible_correct"] / (
+            2
+            * results["top_k"].map(
+                lambda x: (
+                    x
+                    if x is not None
+                    else (
+                        self.conf.model.max_num_keypoints
+                        if self.conf.model.max_num_keypoints is not None
+                        else float("inf")
+                    )
                 )
-                [pose_results[th][k].append(v) for k, v in pose_results_i.items()]
-
-            # we also store the names for later reference
-            results_i["names"] = data["name"][0]
-            if "scene" in data.keys():
-                results_i["scenes"] = data["scene"][0]
-
-            for k, v in results_i.items():
-                results[k].append(v)
-
-        # summarize results as a dict[str, float]
-        # you can also add your custom evaluations here
-        summaries = {}
-        for k, v in results.items():
-            arr = np.array(v)
-            if not np.issubdtype(np.array(v).dtype, np.number):
-                continue
-            summaries[f"m{k}"] = round(np.mean(arr), 3)
-
-        best_pose_results, best_th = eval_poses(
-            pose_results, auc_ths=[5, 10, 20], key="rel_pose_error"
-        )
-        results = {**results, **pose_results[best_th]}
-        summaries = {
-            **summaries,
-            **best_pose_results,
-        }
-
-        figures = {
-            "pose_recall": plot_cumulative(
-                {self.conf.eval.estimator: results["rel_pose_error"]},
-                [0, 30],
-                unit="°",
-                title="Pose ",
             )
-        }
+        )  # Multiple top_k by 2 because we take
+        # sum of correct points from two images
 
-        return summaries, figures, results
+        summaries = (
+            results.groupby(["scene", "top_k", "top_by"])
+            .agg(
+                num_keypoints=pd.NamedAgg(column="num_keypoints", aggfunc="sum"),
+                num_covisible=pd.NamedAgg(column="num_covisible", aggfunc="sum"),
+                num_covisible_correct=pd.NamedAgg(
+                    column="num_covisible_correct", aggfunc="sum"
+                ),
+                localization_score=pd.NamedAgg(
+                    column="localization_score", aggfunc="sum"
+                ),
+                repeatability=pd.NamedAgg(column="repeatability", aggfunc="mean"),
+            )
+            .reset_index()
+        )
+
+        return summaries, {}, results
 
 
 if __name__ == "__main__":

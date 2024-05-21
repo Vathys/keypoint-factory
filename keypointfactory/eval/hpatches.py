@@ -1,7 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
-from typing import Iterable
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -17,7 +16,7 @@ from ..utils.tensor import map_tensor
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import (
-    calc_pair_metrics,
+    eval_pair_homography,
 )
 
 
@@ -83,6 +82,8 @@ class HPatchesPipeline(EvalPipeline):
             }
         },
         "eval": {
+            "correctness_threshold": 3.0,
+            "padding": 4.0,
             "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
         },
@@ -138,28 +139,38 @@ class HPatchesPipeline(EvalPipeline):
             scene_name = str(Path(data["name"][0]).parent)
             for top_k in conf.top_k_thresholds:
                 for top_by in conf.top_k_by:
-                    pair_metrics = calc_pair_metrics(
+                    pair_metrics = eval_pair_homography(
                         data,
                         pred,
                         eval_to_0=False,
                         top_k=int(top_k),
                         top_by=top_by,
-                        thresh=3.0,
-                        padding=4.0,
+                        thresh=conf.correctness_threshold,
+                        padding=conf.padding,
                     )
-                    # This is a quick fix. Don't do this. 
+                    # This is a quick fix. Don't do this.
                     # Handle edge case when calculating repeatability
-                    pair_metrics["top_k"] = (
-                        top_k if top_k is not None else pair_metrics["num_keypoints"]
-                    )
+                    pair_metrics["top_k"] = top_k
                     pair_metrics["top_by"] = top_by
                     pair_metrics["scene"] = scene_name
                     pair_metrics["name"] = data["name"][0]
                     df_list.append(pair_metrics)
 
         results = pd.concat(df_list)
+
         results["repeatability"] = results["num_covisible_correct"] / (
-            2 * results["top_k"]
+            2
+            * results["top_k"].map(
+                lambda x: (
+                    x
+                    if x is not None
+                    else (
+                        self.conf.model.max_num_keypoints
+                        if self.conf.model.max_num_keypoints is not None
+                        else float("inf")
+                    )
+                )
+            )
         )  # Multiple top_k by 2 because we take
         # sum of correct points from two images
 

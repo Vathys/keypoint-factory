@@ -14,6 +14,7 @@ from ..geometry.utils import div0
 from ..robust_estimators import load_estimator
 from ..utils.tensor import index_batch, map_tensor
 from ..utils.tools import AUCMetric
+from ..geometry.depth import sample_depth, project
 
 
 def check_keys_recursive(d, pattern):
@@ -25,6 +26,8 @@ def check_keys_recursive(d, pattern):
 
 
 def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
+    kpts1_w = kpts1_w.nan_to_num(-float("inf"))
+    kpts2_w = kpts2_w.nan_to_num(-float("inf"))
 
     def compute_correctness_single(kpts, kpts_w):
         dist = torch.norm(kpts_w[:, None] - kpts[None], dim=-1)
@@ -48,7 +51,7 @@ def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
     }
 
 
-def get_metrics(
+def get_metrics_homography(
     kpts0,
     kpts1,
     image0_shape,
@@ -158,7 +161,7 @@ def get_metrics(
     return return_dict
 
 
-def calc_pair_metrics(
+def eval_pair_homography(
     data,
     pred,
     eval_to_0=False,
@@ -199,7 +202,7 @@ def calc_pair_metrics(
         return x
 
     if not isinstance(pred["keypoints0"], dict):
-        metric_dict = get_metrics(
+        metric_dict = get_metrics_homography(
             pred["keypoints0"],
             pred["keypoints1"],
             torch.tensor(image0.shape[:2][::-1]),
@@ -238,7 +241,7 @@ def calc_pair_metrics(
                     kpts0 = pred["keypoints0"][index]
                     kpts_scores0 = pred["keypoint_scores0"][index]
 
-                    metric_dict0 = get_metrics(
+                    metric_dict0 = get_metrics_homography(
                         bkpts0,
                         kpts0,
                         bdsize0.flip(0),
@@ -264,7 +267,7 @@ def calc_pair_metrics(
                 kpts1 = pred["keypoints1"][index]
                 kpts_scores1 = pred["keypoint_scores1"][index]
 
-                metric_dict1 = get_metrics(
+                metric_dict1 = get_metrics_homography(
                     bkpts1,
                     kpts1,
                     bdsize1.flip(0),
@@ -296,7 +299,7 @@ def calc_pair_metrics(
                 kpts_scores0 = pred["keypoint_scores0"][index]
                 kpts_scores1 = pred["keypoint_scores1"][index]
 
-                metric_dict = get_metrics(
+                metric_dict = get_metrics_homography(
                     kpts0,
                     kpts1,
                     dsize0.flip(0),
@@ -311,6 +314,239 @@ def calc_pair_metrics(
                 )
                 metric_dict["transform"] = pred["transform_id"][index]
                 return_list.append(map_tensor(metric_dict, untorch))
+
+    pair_df = pd.DataFrame.from_records(return_list)
+    pair_df["name"] = data["name"][0]
+
+    return pair_df
+
+
+def get_metrics_depth(
+    kpts0,
+    kpts1,
+    data_,
+    thresh=3.0,
+    padding=4.0,
+    top_k=None,
+    top_by="scores",
+    return_sum=True,
+    kpts_scores0=None,
+    kpts_scores1=None,
+):
+    return_dict = {}
+
+    depth0 = data_["view0"]["depth"]
+    depth1 = data_["view1"]["depth"]
+    cam0 = data_["view0"]["camera"]
+    cam1 = data_["view1"]["camera"]
+    T0_1 = data_["T_0to1"]
+    T1_0 = T0_1.inv()
+
+    if top_k is not None:
+        if kpts_scores0 is None or kpts_scores1 is None:
+            raise ValueError("kpts_scores0 and kpts_scores1 must be provided")
+
+        if top_by == "scores":
+            idxs0 = torch.argsort(kpts_scores0, descending=True)[:top_k]
+            idxs1 = torch.argsort(kpts_scores1, descending=True)[:top_k]
+
+            kpts0 = kpts0[idxs0]
+            kpts1 = kpts1[idxs1]
+        elif top_by == "dist":
+            d0, valid0 = sample_depth(kpts0[None], depth0[None])
+            d1, valid1 = sample_depth(kpts1[None], depth1[None])
+
+            kpts0_1, _ = project(
+                kpts0[None], d0, depth1[None], cam0, cam1, T0_1, valid0, 3.0
+            )  # [B, M, 2]
+            kpts1_0, _ = project(
+                kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, 3.0
+            )  # [B, N, 2]
+            dists = torch.norm(kpts0_1[:, None] - kpts1[None, :, None], dim=-1)
+            values, indices = torch.sort(dists.min(dim=1)[0], descending=False)
+            idxs0 = indices[~values.isnan()[:]][:500]
+            dists = torch.norm(kpts1_0[:, None] - kpts0[None, :, None], dim=-1)
+            values, indices = torch.sort(dists.min(dim=1)[0], descending=False)
+            idxs1 = indices[~values.isnan()[:]][:500]
+
+            kpts0 = kpts0[idxs0].squeeze(0)
+            kpts1 = kpts1[idxs1].squeeze(0)
+
+            del dists
+
+    d0, valid0 = sample_depth(kpts0[None], depth0[None])
+    d1, valid1 = sample_depth(kpts1[None], depth1[None])
+
+    kpts0_1, vis0 = project(
+        kpts0[None], d0, depth1[None], cam0, cam1, T0_1, valid0, 3.0
+    )  # [M, 2]
+    kpts1_0, vis1 = project(
+        kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, 3.0
+    )  # [N, 2]
+
+    kpts0_1 = kpts0_1.squeeze(0)
+    kpts1_0 = kpts1_0.squeeze(0)
+    vis0 = vis0.squeeze(0)
+    vis1 = vis1.squeeze(0)
+
+    metrics = compute_correctness(kpts0, kpts1, kpts0_1, kpts1_0, thresh, True)
+
+    correct0 = metrics["correct0"][vis0]
+    correct1 = metrics["correct1"][vis1]
+
+    dist0 = metrics["dist0"][vis0]
+    dist1 = metrics["dist1"][vis1]
+
+    score0 = torch.max(1 - (dist0 / thresh), torch.tensor(0.0))
+    score1 = torch.max(1 - (dist1 / thresh), torch.tensor(0.0))
+
+    if return_sum:
+        return_dict["num_keypoints"] = torch.tensor(kpts0.shape[0] + kpts1.shape[0])
+        return_dict["num_covisible"] = vis0.sum() + vis1.sum()
+        return_dict["num_covisible_correct"] = correct0.sum() + correct1.sum()
+        return_dict["localization_score"] = score0.sum() + score1.sum()
+        # return_dict["repeatability"] = div0(
+        #     correct0.sum() + correct1.sum(), vis0.sum() + vis1.sum()
+        # ).float()
+    else:
+        return_dict["num_keypoints"] = torch.tensor(kpts1.shape[0])
+        return_dict["num_covisible"] = vis1.sum()
+        return_dict["num_covisible_correct"] = correct1.sum()
+        return_dict["localization_score"] = score1.sum()
+        # return_dict["repeatability"] = div0(correct1.sum(), vis1.sum()).float()
+
+    return return_dict
+
+
+def eval_pair_depth(
+    data,
+    pred,
+    eval_to_0=False,
+    only_eval_second=False,
+    top_k=None,
+    top_by="scores",
+    thresh=3.0,
+    padding=4.0,
+):
+    return_list = []
+
+    def untorch(x):
+        if torch.is_tensor(x):
+            return x.item() if torch.numel(x) == 1 else x.numpy()
+        return x
+
+    if not isinstance(pred["keypoints0"], dict):
+        metric_dict = get_metrics_depth(
+            pred["keypoints0"],
+            pred["keypoints1"],
+            data,
+            thresh,
+            padding,
+            top_k=top_k,
+            top_by=top_by,
+            kpts_scores0=pred["keypoint_scores0"],
+            kpts_scores1=pred["keypoint_scores1"],
+        )
+
+        return_list.append(map_tensor(metric_dict, untorch))
+    else:
+        raise NotImplementedError("Evaluation of transformed images not supported yet.")
+        # if eval_to_0:
+        #     bmat0 = pred["transform0"]["0"]
+        #     bmat1 = pred["transform1"]["0"]
+        #     bdsize0 = pred["dsize0"]["0"]
+        #     bdsize1 = pred["dsize1"]["0"]
+        #     # print(pred["transform_id"]["0"])
+
+        #     bkpts0 = pred["keypoints0"]["0"]
+        #     bkpts1 = pred["keypoints1"]["0"]
+        #     bkpts_scores0 = pred["keypoint_scores0"]["0"]
+        #     bkpts_scores1 = pred["keypoint_scores1"]["0"]
+
+        #     for i in range(len(pred["keypoints0"])):
+        #         index = str(i)
+        #         if not only_eval_second:
+
+        #             tmat0 = pred["transform0"][index]
+        #             dsize0 = pred["dsize0"][index]
+        #             H0 = tmat0.inverse() @ bmat0
+
+        #             kpts0 = pred["keypoints0"][index]
+        #             kpts_scores0 = pred["keypoint_scores0"][index]
+
+        #             metric_dict0 = get_metrics_depth(
+        #                 bkpts0,
+        #                 kpts0,
+        #                 bdsize0.flip(0),
+        #                 dsize0.flip(0),
+        #                 H0,
+        #                 thresh,
+        #                 padding,
+        #                 return_sum=False,
+        #                 top_k=top_k,
+        #                 top_by=top_by,
+        #                 kpts_scores0=bkpts_scores0,
+        #                 kpts_scores1=kpts_scores0,
+        #             )
+        #             metric_dict0["transform"] = pred["transform_id"][index]
+        #             metric_dict0["image"] = torch.tensor(0)
+        #             return_list.append(map_tensor(metric_dict0, untorch))
+
+        #         tmat1 = pred["transform1"][index]
+        #         dsize1 = pred["dsize1"][index]
+
+        #         H1 = tmat1.inverse() @ bmat1
+
+        #         kpts1 = pred["keypoints1"][index]
+        #         kpts_scores1 = pred["keypoint_scores1"][index]
+
+        #         metric_dict1 = get_metrics_depth(
+        #             bkpts1,
+        #             kpts1,
+        #             bdsize1.flip(0),
+        #             dsize1.flip(0),
+        #             H1,
+        #             thresh,
+        #             padding,
+        #             return_sum=False,
+        #             top_k=top_k,
+        #             top_by=top_by,
+        #             kpts_scores0=bkpts_scores1,
+        #             kpts_scores1=kpts_scores1,
+        #         )
+        #         metric_dict1["transform"] = pred["transform_id"][index]
+        #         metric_dict1["image"] = torch.tensor(1)
+        #         return_list.append(map_tensor(metric_dict1, untorch))
+        # else:
+        #     for i in range(len(pred["keypoints0"])):
+        #         index = str(i)
+        #         tmat0 = pred["transform0"][index]
+        #         dsize0 = pred["dsize0"][index]
+        #         tmat1 = pred["transform1"][index]
+        #         dsize1 = pred["dsize1"][index]
+
+        #         H_new = tmat1 @ H @ tmat0.inverse()
+
+        #         kpts0 = pred["keypoints0"][index]
+        #         kpts1 = pred["keypoints1"][index]
+        #         kpts_scores0 = pred["keypoint_scores0"][index]
+        #         kpts_scores1 = pred["keypoint_scores1"][index]
+
+        #         metric_dict = get_metrics_depth(
+        #             kpts0,
+        #             kpts1,
+        #             dsize0.flip(0),
+        #             dsize1.flip(0),
+        #             H_new,
+        #             thresh,
+        #             padding,
+        #             top_k=top_k,
+        #             top_by=top_by,
+        #             kpts_scores0=kpts_scores0,
+        #             kpts_scores1=kpts_scores1,
+        #         )
+        #         metric_dict["transform"] = pred["transform_id"][index]
+        #         return_list.append(map_tensor(metric_dict, untorch))
 
     pair_df = pd.DataFrame.from_records(return_list)
     pair_df["name"] = data["name"][0]
