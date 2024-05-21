@@ -1,10 +1,10 @@
 from collections import defaultdict
-from collections.abc import Iterable
 from pathlib import Path
 from pprint import pprint
+from typing import Iterable
 
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -14,16 +14,56 @@ from ..models.cache_loader import CacheLoader
 from ..settings import EVAL_PATH
 from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
-from ..utils.tools import AUCMetric
-from ..visualization.viz2d import plot_cumulative
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import (
-    eval_homography_dlt,
-    eval_homography_robust,
-    eval_keypoints_homography,
-    eval_poses,
+    calc_pair_metrics,
 )
+
+
+def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):
+    name = None
+    group = []
+
+    for i, data in enumerate(data_loader):
+        if name is None:
+            name = str(Path(data["name"][0]).parent)
+            if squeezed:
+                group.append(
+                    (
+                        map_tensor(data, lambda x: torch.squeeze(x, dim=0)),
+                        cache_loader(data),
+                    )
+                )
+            else:
+                group.append((data, cache_loader(data)))
+            continue
+
+        if str(Path(data["name"][0]).parent) == name:
+            if squeezed:
+                group.append(
+                    (
+                        map_tensor(data, lambda x: torch.squeeze(x, dim=0)),
+                        cache_loader(data),
+                    )
+                )
+            else:
+                group.append((data, cache_loader(data)))
+        else:
+            yield name, group
+            name = str(Path(data["name"][0]).parent)
+            if squeezed:
+                group = [
+                    (
+                        map_tensor(data, lambda x: torch.squeeze(x, dim=0)),
+                        cache_loader(data),
+                    )
+                ]
+            else:
+                group = [(data, cache_loader(data))]
+
+    if len(group) > 0:
+        yield name, group
 
 
 class HPatchesPipeline(EvalPipeline):
@@ -43,8 +83,8 @@ class HPatchesPipeline(EvalPipeline):
             }
         },
         "eval": {
-            "estimator": "poselib",
-            "ransac_th": 1.0,  # -1 runs a bunch of thresholds and selects the best
+            "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
+            "top_k_by": "scores",  # either "scores" or "distances", or list of both
         },
     }
     export_keys = [
@@ -52,24 +92,9 @@ class HPatchesPipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
-        "matches0",
-        "matches1",
-        "matching_scores0",
-        "matching_scores1",
         "descriptors0",
         "descriptors1",
     ]
-
-    # optional_export_keys = [
-    #     "lines0",
-    #     "lines1",
-    #     "orig_lines0",
-    #     "orig_lines1",
-    #     "line_matches0",
-    #     "line_matches1",
-    #     "line_matching_scores0",
-    #     "line_matching_scores1",
-    # ]
 
     def _init(self, conf):
         pass
@@ -100,85 +125,61 @@ class HPatchesPipeline(EvalPipeline):
 
         conf = self.conf.eval
 
-        test_thresholds = (
-            ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
-            if not isinstance(conf.ransac_th, Iterable)
-            else conf.ransac_th
-        )
-        pose_results = defaultdict(lambda: defaultdict(list))
+        if isinstance(conf.top_k_thresholds, int):
+            conf.top_k_thresholds = [conf.top_k_thresholds]
+        if isinstance(conf.top_k_by, str):
+            conf.top_k_by = [conf.top_k_by]
+
+        df_list = []
         cache_loader = CacheLoader({"path": str(pred_file), "collate": None}).eval()
-        for i, data in enumerate(tqdm(loader)):
+        for data in tqdm(loader):
             pred = cache_loader(data)
-            # Remove batch dimension
-            data = map_tensor(data, lambda t: torch.squeeze(t, dim=0))
-            # add custom evaluations here
-            if "keypoints0" in pred:
-                results_i = {}
-                # results_i = eval_matches_homography(data, pred)
-                results_i = {**results_i, **eval_homography_dlt(data, pred)}
-                if "matches0" in pred:
-                    results_i = {
-                        **results_i,
-                        **eval_keypoints_homography(
-                            data, pred, 3.0, 200
-                        ),  # use config for
-                        # correctness threshold (?),
-                        # top keypoints (?)
-                    }
-            else:
-                results_i = {}
-            for th in test_thresholds:
-                pose_results_i = eval_homography_robust(
-                    data,
-                    pred,
-                    {"estimator": conf.estimator, "ransac_th": th},
-                )
-                [pose_results[th][k].append(v) for k, v in pose_results_i.items()]
+            data = map_tensor(data, lambda x: torch.squeeze(x, dim=0))
+            scene_name = str(Path(data["name"][0]).parent)
+            for top_k in conf.top_k_thresholds:
+                for top_by in conf.top_k_by:
+                    pair_metrics = calc_pair_metrics(
+                        data,
+                        pred,
+                        eval_to_0=False,
+                        top_k=int(top_k),
+                        top_by=top_by,
+                        thresh=3.0,
+                        padding=4.0,
+                    )
+                    # This is a quick fix. Don't do this. 
+                    # Handle edge case when calculating repeatability
+                    pair_metrics["top_k"] = (
+                        top_k if top_k is not None else pair_metrics["num_keypoints"]
+                    )
+                    pair_metrics["top_by"] = top_by
+                    pair_metrics["scene"] = scene_name
+                    pair_metrics["name"] = data["name"][0]
+                    df_list.append(pair_metrics)
 
-            # we also store the names for later reference
-            results_i["names"] = data["name"][0]
-            results_i["scenes"] = data["scene"][0]
+        results = pd.concat(df_list)
+        results["repeatability"] = results["num_covisible_correct"] / (
+            2 * results["top_k"]
+        )  # Multiple top_k by 2 because we take
+        # sum of correct points from two images
 
-            for k, v in results_i.items():
-                results[k].append(v)
-
-        # summarize results as a dict[str, float]
-        # you can also add your custom evaluations here
-        summaries = {}
-        for k, v in results.items():
-            arr = np.array(v)
-            if not np.issubdtype(np.array(v).dtype, np.number):
-                continue
-            summaries[f"m{k}"] = round(np.mean(arr), 3)
-
-        auc_ths = [1, 3, 5]
-        best_pose_results, best_th = eval_poses(
-            pose_results, auc_ths=auc_ths, key="H_error_ransac", unit="px"
-        )
-        if "H_error_dlt" in results.keys():
-            dlt_aucs = AUCMetric(auc_ths, results["H_error_dlt"]).compute()
-            for i, ath in enumerate(auc_ths):
-                summaries[f"H_error_dlt@{ath}px"] = dlt_aucs[i]
-
-        results = {**results, **pose_results[best_th]}
-        summaries = {
-            **summaries,
-            **best_pose_results,
-        }
-
-        figures = {
-            "homography_recall": plot_cumulative(
-                {
-                    "DLT": results["H_error_dlt"],
-                    self.conf.eval.estimator: results["H_error_ransac"],
-                },
-                [0, 10],
-                unit="px",
-                title="Homography ",
+        summaries = (
+            results.groupby(["scene", "top_k", "top_by"])
+            .agg(
+                num_keypoints=pd.NamedAgg(column="num_keypoints", aggfunc="sum"),
+                num_covisible=pd.NamedAgg(column="num_covisible", aggfunc="sum"),
+                num_covisible_correct=pd.NamedAgg(
+                    column="num_covisible_correct", aggfunc="sum"
+                ),
+                localization_score=pd.NamedAgg(
+                    column="localization_score", aggfunc="sum"
+                ),
+                repeatability=pd.NamedAgg(column="repeatability", aggfunc="mean"),
             )
-        }
+            .reset_index()
+        )
 
-        return summaries, figures, results
+        return summaries, {}, results
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import h5py
 
 from ..geometry.wrappers import Camera, Pose
 from ..settings import DATA_PATH
@@ -59,9 +60,19 @@ class ImagePairs(BaseDataset, torch.utils.data.Dataset):
         return self
 
     def _read_view(self, name):
-        path = DATA_PATH / self.conf.root / name
-        img = load_image(path)
-        return self.preprocessor(img)
+        img_path = DATA_PATH / self.conf.root / "images" / name
+        depth_path = DATA_PATH / self.conf.root / "depths" / name
+        img = load_image(img_path)
+        if depth_path.exists():
+            with h5py.File(str(depth_path), "r") as f:
+                depth = f["/depth"].__array__().astype(np.float32, copy=False)
+                depth = torch.Tensor(depth)[None]
+            assert depth.shape[-2:] == img.shape[-2:]
+
+        data = self.preprocessor(img)
+        data["depth"] = self.preprocesor(depth, interpolation="nearest")["image"][0]
+
+        return data
 
     def __getitem__(self, idx):
         line = self.items[idx]

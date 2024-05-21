@@ -28,7 +28,7 @@ class MegaDepth1500Pipeline(EvalPipeline):
         "data": {
             "name": "image_pairs",
             "pairs": "megadepth1500/pairs_calibrated.txt",
-            "root": "megadepth1500/images/",
+            "root": "megadepth1500/",
             "extra_data": "relative_pose",
             "preprocessing": {
                 "side": "long",
@@ -50,10 +50,6 @@ class MegaDepth1500Pipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
-        # "matches0",
-        # "matches1",
-        # "matching_scores0",
-        # "matching_scores1",
     ]
     optional_export_keys = []
 
