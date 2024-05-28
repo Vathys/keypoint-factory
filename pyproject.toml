@@ -32,6 +32,7 @@ dependencies = [
     "kornia",
     "seaborn",
     "joblib",
+    "tables",
     "pydegensac",
 ]
 urls = {Repository = "https://github.com/Vathys/keypoint-factory"}
