@@ -8,12 +8,12 @@ data:
     align_corners: False
     square_pad: true
   train_split: disk_train_scenes.txt
-  train_num_per_scene: 65
+  train_num_per_scene: 64
   val_split: disk_valid_scenes.txt
   val_num_per_scene: 250
   read_depth: true
   read_image: true
-  num_workers: 14
+  num_workers: 10
   batch_size: 2
   min_overlap: 0.0
   max_overlap: 1.0
@@ -36,6 +36,8 @@ train:
   log_every_iter: 100
   eval_every_iter: 500
   save_every_iter: 2500
+  log_grad_every_iter: 100
+  keep_last_checkpoints: 30
   lr: 1e-4
   lr_schedule:
     type: null
