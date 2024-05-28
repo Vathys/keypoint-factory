@@ -27,8 +27,8 @@ def check_keys_recursive(d, pattern):
 
 
 def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
-    kpts1_w = kpts1_w.nan_to_num(-float("inf"))
-    kpts2_w = kpts2_w.nan_to_num(-float("inf"))
+    kpts1_w = kpts1_w.nan_to_num(float("inf"))
+    kpts2_w = kpts2_w.nan_to_num(float("inf"))
 
     def compute_correctness_single(kpts, kpts_w):
         dist = torch.norm(kpts_w[:, None] - kpts[None], dim=-1)
@@ -385,6 +385,8 @@ def get_metrics_depth(
         kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, 3.0
     )  # [N, 2]
 
+    kpts0 = kpts0.squeeze(0)
+    kpts1 = kpts1.squeeze(0)
     kpts0_1 = kpts0_1.squeeze(0)
     kpts1_0 = kpts1_0.squeeze(0)
     vis0 = vis0.squeeze(0)
@@ -612,7 +614,7 @@ def get_desc_matches(kpts0, kpts1, desc0, desc1):
     mask = nnnn[0] == n_ix
 
     pts0 = kpts0[:, torch.nonzero(mask, as_tuple=False)[:, 0], :]
-    pts1 = kpts1[:, m_amin[0][mask], :]
+    pts1 = kpts1[:, n_amin[0][mask], :]
 
     return pts0, pts1
 
