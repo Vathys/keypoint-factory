@@ -1,44 +1,21 @@
-import json
+import pandas as pd
 
-import h5py
-import numpy as np
 from omegaconf import OmegaConf
 
 
 def load_eval(dir):
-    summaries, results = {}, {}
-    with h5py.File(str(dir / "results.h5"), "r") as hfile:
-        for k in hfile.keys():
-            r = np.array(hfile[k])
-            if len(r.shape) < 3:
-                results[k] = r
-        for k, v in hfile.attrs.items():
-            summaries[k] = v
-    with open(dir / "summaries.json", "r") as f:
-        s = json.load(f)
-    summaries = {k: v if v is not None else np.nan for k, v in s.items()}
+    results = pd.read_hdf(str(dir / "results.h5"), key="results", mode='r')
+    summaries = pd.read_json(str(dir / "summaries.json"), orient="records")
     return summaries, results
 
 
 def save_eval(dir, summaries, figures, results):
-    with h5py.File(str(dir / "results.h5"), "w") as hfile:
-        for k, v in results.items():
-            arr = np.array(v)
-            if not np.issubdtype(arr.dtype, np.number):
-                arr = arr.astype("object")
-            hfile.create_dataset(k, data=arr)
-        # just to be safe, not used in practice
-        for k, v in summaries.items():
-            hfile.attrs[k] = v
-    s = {
-        k: float(v) if np.isfinite(v) else None
-        for k, v in summaries.items()
-        if not isinstance(v, list)
-    }
-    s = {**s, **{k: v for k, v in summaries.items() if isinstance(v, list)}}
-    with open(dir / "summaries.json", "w") as f:
-        json.dump(s, f, indent=4)
-
+    results.to_hdf(
+        str(dir / "results.h5"), key="results", mode="w", format="fixed", index="False"
+    )
+    summaries.to_json(
+        str(dir / "summaries.json"), orient="records", indent=4, mode="w"
+    )
     for fig_name, fig in figures.items():
         fig.savefig(dir / f"{fig_name}.png")
 
