@@ -10,7 +10,7 @@ data:
   train_split: disk_train_scenes.txt
   train_num_per_scene: 65
   val_split: disk_valid_scenes.txt
-  val_num_per_scene: 2500
+  val_num_per_scene: 250
   read_depth: true
   read_image: true
   num_workers: 14
@@ -39,7 +39,7 @@ train:
   lr: 1e-4
   lr_schedule:
     type: null
-  lr_scaling: []
+  lr_scaling: [()]
   mixed_precision: False
-  plot: [10, 'keypointfactory.visualization.visualize_batch.make_keypoint_figures']
+  plot: [5, 'keypointfactory.visualization.visualize_batch.make_keypoint_figures']
   substep: 1
