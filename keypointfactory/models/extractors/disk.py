@@ -122,10 +122,10 @@ class CycleMatcher:
         d1, valid1 = sample_depth(kpts1, depth1)
 
         kpts0_1, visible0 = project(
-            kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 3.0
+            kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 1.0
         )  # [B, M, 2]
         kpts1_0, visible1 = project(
-            kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 3.0
+            kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 1.0
         )  # [B, N, 2]
         mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
 
