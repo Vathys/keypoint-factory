@@ -54,6 +54,8 @@ class MegaDepth1500Pipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
+        "descriptors0",
+        "descriptors1",
     ]
     optional_export_keys = []
 
@@ -114,6 +116,7 @@ class MegaDepth1500Pipeline(EvalPipeline):
             assert "depth" in data["view0"]
             pred = cache_loader(data)
             data = map_tensor(data, lambda x: torch.squeeze(x, dim=0))
+            pred = map_tensor(pred, lambda x: torch.squeeze(x, dim=0))
             scene_name = data["name"][0].split("-")[0]
             for top_k in conf.top_k_thresholds:
                 for top_by in conf.top_k_by:

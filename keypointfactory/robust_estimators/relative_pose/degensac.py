@@ -33,7 +33,10 @@ class DegensacPoseEstimator(BaseEstimator):
         K0 = camera0.calibration_matrix().unsqueeze(0)
         K1 = camera1.calibration_matrix().unsqueeze(0)
 
-        if pts0.shape[1] < self.conf.options["candidate_threshold"]:
+        if (
+            pts0.shape[1] < self.conf.options["candidate_threshold"]
+            or pts1.shape[1] < self.conf.options["candidate_threshold"]
+        ):
             return {
                 "success": False,
                 "M_0to1": Pose.from_4x4mat(torch.eye(4)).to(pts0),

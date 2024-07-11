@@ -27,11 +27,10 @@ def check_keys_recursive(d, pattern):
 
 
 def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
-    kpts1_w = kpts1_w.nan_to_num(float("inf"))
-    kpts2_w = kpts2_w.nan_to_num(float("inf"))
-
     def compute_correctness_single(kpts, kpts_w):
         dist = torch.norm(kpts_w[:, None] - kpts[None], dim=-1)
+        if dist.shape[0] == 0 or dist.shape[1] == 0:
+            return torch.Tensor(dist.shape), torch.Tensor(dist.shape), torch.Tensor(dist.shape)
         min_dist, matches = dist.min(dim=1)
         correct = min_dist <= thresh
         if mutual:
@@ -365,10 +364,10 @@ def get_metrics_depth(
             )  # [B, N, 2]
             dists = torch.norm(kpts0_1[:, None] - kpts1[None, :, None], dim=-1)
             values, indices = torch.sort(dists.min(dim=1)[0], descending=False)
-            idxs0 = indices[~values.isnan()[:]][:500]
+            idxs0 = indices[~values.isnan()[:]][:top_k]
             dists = torch.norm(kpts1_0[:, None] - kpts0[None, :, None], dim=-1)
             values, indices = torch.sort(dists.min(dim=1)[0], descending=False)
-            idxs1 = indices[~values.isnan()[:]][:500]
+            idxs1 = indices[~values.isnan()[:]][:top_k]
 
             kpts0 = kpts0[idxs0].squeeze(0)
             kpts1 = kpts1[idxs1].squeeze(0)
@@ -599,6 +598,9 @@ def get_depth_matches(kpts0, kpts1, depth0, depth1, camera0, camera1, T_0to1):
 
 
 def get_desc_matches(kpts0, kpts1, desc0, desc1):
+    if kpts0.shape[1] == 0 or kpts1.shape[1] == 0:
+        return torch.Tensor(kpts0.shape), torch.Tensor(kpts1.shape)
+    
     distances = distance_matrix(
         desc0,
         desc1,
