@@ -4,12 +4,11 @@ from pathlib import Path
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
 from ..utils.blocks import get_module
-from ..utils.misc import pad_and_stack, distance_matrix
+from ..utils.misc import pad_and_stack, distance_matrix, tile, select_on_last
 from ...geometry.epipolar import (
     T_to_F,
     asymm_epipolar_distance_all,
 )
-from ...geometry.depth import sample_depth, project
 
 
 def point_distribution(logits):
@@ -17,12 +16,12 @@ def point_distribution(logits):
     proposals = proposal_dist.sample()
     proposal_logp = proposal_dist.log_prob(proposals)
 
-    accept_logits = torch.gather(logits, -1, proposals.unsqueeze(-1)).squeeze(-1)
-
+    accept_logits = select_on_last(logits, proposals).squeeze(-1)
+    
     accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
     accept_samples = accept_dist.sample()
     accept_logp = accept_dist.log_prob(accept_samples)
-    accept_mask = accept_samples == 1.0
+    accept_mask = accept_samples == 1
 
     logp = proposal_logp + accept_logp
 
@@ -115,23 +114,30 @@ class CycleMatcher:
         depth1 = data["view1"]["depth"]
         cam0 = data["view0"]["camera"]
         cam1 = data["view1"]["camera"]
-        T0_1 = data["T_0to1"]
-        T1_0 = data["T_1to0"]
+        T0 = data["view0"]["T_w2cam"]
+        T1 = data["view1"]["T_w2cam"]
 
-        d0, valid0 = sample_depth(kpts0, depth0)
-        d1, valid1 = sample_depth(kpts1, depth1)
+        kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+        kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
-        kpts0_1, visible0 = project(
-            kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 1.0
-        )  # [B, M, 2]
-        kpts1_0, visible1 = project(
-            kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 1.0
-        )  # [B, N, 2]
-        mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
+        # d0, valid0 = sample_depth(kpts0, depth0)
+        # d1, valid1 = sample_depth(kpts1, depth1)
 
-        dist0 = torch.norm(kpts0_1[:, :, None, :] - kpts1[:, None, :, :], dim=-1)
-        dist1 = torch.norm(kpts0[:, :, None, :] - kpts1_0[:, None, :, :], dim=-1)
+        # kpts0_1, visible0 = project(
+        #     kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 1.0
+        # )  # [B, M, 2]
+        # kpts1_0, visible1 = project(
+        #     kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 1.0
+        # )  # [B, N, 2]
+        # mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
+
+        diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
+        diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
+    
+        dist0 = torch.norm(diff0, dim=-1)
+        dist1 = torch.norm(diff1, dim=-1)
         dist = torch.max(dist0, dist1)
+        mask_visible = ~torch.isnan(dist)
         inf = dist.new_tensor(float("inf"))
         dist = torch.where(mask_visible, dist, inf)
 
@@ -246,6 +252,34 @@ class Unet(torch.nn.Module):
 
         return f_bot
 
+def unproject(kpts, depth, cam, pose):
+    batch, h, w = depth.shape
+    in_range = (0 <= kpts[:, :, 0]) & (kpts[:, :, 0] < w) & (0 <= kpts[:, :, 1]) & (kpts[:, :, 1] < h)
+    finite = torch.isfinite(kpts).all(dim = 2)
+    valid_depth = in_range & finite
+
+    valid_kpts = []
+    for b in range(batch):
+        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
+    fdepth = torch.full(
+        kpts.shape[:2],
+        fill_value = float('NaN'),
+        device=kpts.device,
+        dtype=kpts.dtype,
+    )
+    
+    for b in range(batch):
+        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
+
+    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
+    kptsw = pose.inv().transform(kptsc)
+
+    return kptsw
+
+def project(kptsw, cam, pose):
+    ext = pose.transform(kptsw)
+    kpts, _ = cam.cam2image(ext)
+    return kpts
 
 def classify_by_epipolar(data, pred, threshold=2.0):
     F_0_1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], data["T_0to1"])
@@ -262,7 +296,7 @@ def classify_by_epipolar(data, pred, threshold=2.0):
     if epi_1_0.dim() == 2:
         epi_1_0 = epi_1_0.unsqueeze(0)
 
-    return (epi_0_1 < threshold).transpose(1, 2) & (epi_1_0 < threshold)
+    return (epi_0_1 < threshold) & (epi_1_0 < threshold).transpose(1, 2)
 
 
 def classify_by_depth(data, pred, threshold=2.0):
@@ -273,18 +307,15 @@ def classify_by_depth(data, pred, threshold=2.0):
     depth1 = data["view1"]["depth"]
     cam0 = data["view0"]["camera"]
     cam1 = data["view1"]["camera"]
-    T0_1 = data["T_0to1"]
-    T1_0 = data["T_1to0"]
+    T0 = data["view0"]["T_w2cam"]
+    T1 = data["view1"]["T_w2cam"]
 
-    interp0, valid0 = sample_depth(kpts0, depth0)
-    interp1, valid1 = sample_depth(kpts1, depth1)
+    kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+    kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
-    kpts0_1, _ = project(kpts0, interp0, None, cam0, cam1, T0_1, valid0)  # [B, M, 2]
-    kpts1_0, _ = project(kpts1, interp1, None, cam1, cam0, T1_0, valid1)  # [B, N, 2]
-
-    diff0 = kpts1_0[:, None, :, :] - kpts0[:, :, None, :]
-    diff1 = kpts0_1[:, :, None, :] - kpts1[:, None, :, :]
-
+    diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
+    diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
+    
     close0 = torch.norm(diff0, p=2, dim=-1) < threshold
     close1 = torch.norm(diff1, p=2, dim=-1) < threshold
 
@@ -309,7 +340,7 @@ class DISK(BaseModel):
         "nms_radius": 2,  # matches with disk nms radius of 5
         "max_num_keypoints": None,
         "force_num_keypoints": False,
-        "pad_if_not_divisible": True,
+        "pad_if_not_divisible": False,
         "detection_threshold": 0.005,
         "desc_dim": 128,
         "weights": None,
@@ -369,9 +400,11 @@ class DISK(BaseModel):
                 print("Starting new checkpoint")
 
         if state_dict:
-            if "disk" in state_dict:
+            if "disk" in state_dict or "extractor" in state_dict:
+                print("Detected original disk repo weights...")
                 model_sd = {}
-                for k, v in state_dict["disk"].items():
+                key = "disk" if "disk" in state_dict else "extractor"
+                for k, v in state_dict[key].items():
                     parts = k.split(".")
                     parts[3] = "sequence"
                     parts[4] = (
@@ -386,6 +419,8 @@ class DISK(BaseModel):
                 )
             else:
                 model_sd = {}
+                print("Keypointfactory repo weights...")
+                state = state_dict["model"] if "model" in state_dict.keys() else state_dict
                 for k, v in state_dict["model"].items():
                     model_sd[k.replace("extractor.", "")] = v
                 missing_keys, unexpected_keys = self.load_state_dict(
@@ -403,18 +438,14 @@ class DISK(BaseModel):
     def _sample(self, heatmaps):
         v = self.conf.window_size
         device = heatmaps.device
-        b, c, h, w = heatmaps.shape
+        b, _, h, w = heatmaps.shape
 
         assert h % v == 0
         assert w % v == 0
 
-        tiled = (
-            heatmaps.unfold(2, v, v)
-            .unfold(3, v, v)
-            .reshape(b, c, h // v, w // v, v * v)
-        )
+        tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(tiled.squeeze(1))
+        proposals, accept_mask, logp = point_distribution(tiled)
 
         cgrid = torch.stack(
             torch.meshgrid(
@@ -423,25 +454,18 @@ class DISK(BaseModel):
             )[::-1],
             dim=0,
         ).unsqueeze(0)
-        cgrid_tiled = (
-            cgrid.unfold(2, v, v).unfold(3, v, v).reshape(1, 2, h // v, w // v, v * v)
-        )
+        cgrid_tiled = tile(cgrid, self.conf.window_size)
 
-        xys = (
-            torch.gather(
-                cgrid_tiled.repeat(b, 1, 1, 1, 1),
-                -1,
-                proposals.unsqueeze(1).repeat(1, 2, 1, 1).unsqueeze(-1),
-            )
-            .squeeze(-1)
-            .permute(0, 2, 3, 1)
-        )
+        xys = select_on_last(
+            cgrid_tiled.repeat(b, 1, 1, 1, 1),
+            proposals.unsqueeze(1).repeat(1, 2, 1, 1)
+        ).permute(0, 2, 3, 1)
 
         keypoints = []
         scores = []
-
+        
         for i in range(b):
-            keypoints.append(xys[i][accept_mask[i], :])
+            keypoints.append(xys[i][accept_mask[i]])
             scores.append(logp[i][accept_mask[i]])
 
         return keypoints, scores
@@ -588,17 +612,22 @@ class DISK(BaseModel):
 
         kpts_logp = logp0[:, :, None] + logp1[:, None, :]
 
-        reinforce = (elementwise_reward * sample_p * (sample_logp + kpts_logp)).sum(
-            dim=(1, 2)
+        sample_lp_flat = logp0.sum(dim=1) + logp1.sum(dim=1)
+
+        sample_plogp = sample_p * (sample_logp + kpts_logp)
+
+        reinforce = (elementwise_reward * sample_plogp).sum(
+            dim=(-1, -2)
         )
-        kp_penalty = self.lm_kp * (logp0.sum(dim=1) + logp1.sum(dim=1))
+        
+        kp_penalty = self.lm_kp * sample_lp_flat
 
         loss = -reinforce - kp_penalty
 
         losses = {
             "total": loss,
-            "reinforce": -reinforce,
-            "kp_penalty": -kp_penalty,
+            "reinforce": reinforce,
+            "kp_penalty": kp_penalty,
         }
         del (
             logp0,

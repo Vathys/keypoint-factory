@@ -1,0 +1,1 @@
+/cluster/project/infk/cvg/local_features_data/megadepth/disk_train_scenes.txt

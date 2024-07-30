@@ -9,7 +9,7 @@ import copy
 import re
 import shutil
 import signal
-from collections import defaultdict
+from collections import defaultdict, Counter
 from pathlib import Path
 from pydoc import locate
 
@@ -36,6 +36,7 @@ from .utils.tools import (
     fork_rng,
     set_seed,
 )
+from .models.triplet_pipeline import TripletPipeline
 
 # @TODO: Fix pbar pollution in logs
 # @TODO: add plotting during evaluation
@@ -55,6 +56,7 @@ default_train_conf = {
         "factor": 1.0,
         "options": {},  # add lr_scheduler arguments here
     },
+    "warmup": 500,
     "lr_scaling": [(100, ["dampingnet.const"])],
     "eval_every_iter": 1000,  # interval for evaluation on the validation set
     "save_every_iter": 5000,  # interval for saving the current checkpoint
@@ -78,10 +80,24 @@ default_train_conf = OmegaConf.create(default_train_conf)
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
+model_og = TripletPipeline({
+    "extractor": {
+        "name": "disk_kornia",
+        "max_num_keypoints": None,
+        "force_num_keypoints": True,
+        "detection_threshold": 0.0,
+        "trainable": False,
+    },
+    "batch_triplets": False,
+})
 
 @torch.no_grad()
 def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
     model.eval()
+    
+    global model_og
+    model_og = model_og.to(device)
+
     results = {}
     pr_metrics = defaultdict(PRMetric)
     figures = []
@@ -94,9 +110,12 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
         data = batch_to_device(data, device, non_blocking=True)
         with torch.no_grad():
             pred = model(data)
+            pred_og = model_og(data)
             losses, metrics = loss_fn(pred, data)
             if conf.plot is not None and i in plot_ids:
                 figures.append(locate(plot_fn)(pred, data))
+                figures.append(locate(plot_fn)(pred_og, data))
+
             # add PR curves
             for k, v in conf.pr_curves.items():
                 pr_metrics[k].update(
@@ -361,6 +380,8 @@ def training(rank, conf, output_dir, args):
             with_stack=True,
         )
         prof.__enter__()
+
+    image_names = []
     while epoch < conf.train.epochs and not stop:
         if rank == 0:
             logger.info(f"Starting epoch {epoch}")
@@ -419,8 +440,11 @@ def training(rank, conf, output_dir, args):
                 # We normalize the x-axis of tensorflow to num samples!
                 tot_n_samples *= train_loader.batch_size
 
+            if conf.train.warmup is not None and epoch == 0 and it > conf.train.warmup:
+                break
+
             model.train()
-            substep_ = conf.get("substep", 1)
+            substep_ = conf.train.get("substep", 1)
             if it % substep_ == substep_ - 1:
                 optimizer.zero_grad()
 

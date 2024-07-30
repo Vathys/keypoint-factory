@@ -112,6 +112,20 @@ def size_is_pow2(t):
     """Check if the trailing spatial dimensions are powers of 2"""
     return all(s % 2 == 0 for s in t.size()[-2:])
 
+def tile(hm, window):
+    b, c, h, w = hm.shape
+
+    assert hm.shape[2] % window == 0
+    assert hm.shape[3] % window == 0
+
+    return hm.unfold(2, window, window).unfold(3, window, window).reshape(b, c, h // window, w // window, window*window)
+
+def select_on_last(values, indices):
+    return torch.gather(
+        values,
+        -1,
+        indices[..., None]
+    ).squeeze(-1)
 
 def distance_matrix(fs1, fs2):
     """

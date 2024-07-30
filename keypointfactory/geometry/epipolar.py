@@ -81,9 +81,9 @@ def asymm_epipolar_distance_all(p0, p1, F):
         The asymmetric epipolar distance of each point-pair: (..., N).
     """
     if p0.shape[-2] == 0:
-        p0 = torch.zeros((*p0.shape[:-2], 1, p0.shape[-1])).to(p0)
+        p0 = torch.zeros((*p0.shape[:-2], 1, p0.shape[-1])).to(p0.dtype)
     if p1.shape[-2] == 0:
-        p1 = torch.zeros((*p1.shape[:-2], 1, p1.shape[-1])).to(p1)
+        p1 = torch.zeros((*p1.shape[:-2], 1, p1.shape[-1])).to(p1.dtype)
     if p0.shape[-1] != 3:
         p0 = to_homogeneous(p0)
     if p1.shape[-1] != 3:
@@ -91,7 +91,7 @@ def asymm_epipolar_distance_all(p0, p1, F):
     Ft_p1 = torch.einsum("...ij,...mi->...mj", F, p1.to(F))
     norm = torch.norm(Ft_p1[..., :2], p=2, dim=-1).clamp(min=1e-6)
     dist = torch.einsum("...ij,...nj->...ni", Ft_p1 / norm[..., None], p0.to(F))
-    return dist.transpose(-2, -1)
+    return dist
 
 
 def generalized_epi_dist(
