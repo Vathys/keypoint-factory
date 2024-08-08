@@ -16,8 +16,8 @@ data:
   read_image: true
   num_workers: 10
   batch_size: 2
-  min_overlap: 0.0
-  max_overlap: 1.0
+  min_overlap: 0.15
+  max_overlap: 0.8
   triplet_enforce_overlap: false
   seed: 42
   load_features:
@@ -42,6 +42,10 @@ train:
   log_grad_every_iter: 1000
   keep_last_checkpoints: 30
   dataset_callback_fn: sample_new_items
+  auc_metrics:
+    desc_rel_pose_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    depth_rel_pose_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  best_key: "desc_rel_pose_error_auc"
   lr: 1e-4
   lr_schedule:
     type: null

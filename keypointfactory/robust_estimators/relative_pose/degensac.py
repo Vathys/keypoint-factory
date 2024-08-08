@@ -30,8 +30,8 @@ class DegensacPoseEstimator(BaseEstimator):
         camera0 = data["camera0"]
         camera1 = data["camera1"]
 
-        K0 = camera0.calibration_matrix().unsqueeze(0)
-        K1 = camera1.calibration_matrix().unsqueeze(0)
+        K0 = camera0.calibration_matrix().unsqueeze(0).to(pts0.device)
+        K1 = camera1.calibration_matrix().unsqueeze(0).to(pts0.device)
 
         if (
             pts0.shape[1] < self.conf.options["candidate_threshold"]
@@ -39,8 +39,8 @@ class DegensacPoseEstimator(BaseEstimator):
         ):
             return {
                 "success": False,
-                "M_0to1": Pose.from_4x4mat(torch.eye(4)).to(pts0),
-                "inliers": torch.tensor([]).to(pts0),
+                "M_0to1": Pose.from_4x4mat(torch.eye(4)).to(pts0.device),
+                "inliers": torch.tensor([]).to(pts0.device),
             }
 
         F, mask = pydegensac.findFundamentalMatrix(
@@ -55,12 +55,12 @@ class DegensacPoseEstimator(BaseEstimator):
             logger.warning("Degensac failed to find a solution")
             return {
                 "success": False,
-                "M_0to1": Pose.from_4x4mat(torch.eye(4)).to(pts0),
-                "inliers": torch.tensor([]).to(pts0),
+                "M_0to1": Pose.from_4x4mat(torch.eye(4)).to(pts0.device),
+                "inliers": torch.tensor([]).to(pts0.device),
             }
 
-        mask = torch.from_numpy(mask)
-        F = torch.from_numpy(F).unsqueeze(0).to(pts0)
+        mask = torch.from_numpy(mask).to(pts0.device)
+        F = torch.from_numpy(F).unsqueeze(0).float().to(pts0.device)
 
         E = F_to_E(camera0, camera1, F)
 
@@ -75,6 +75,6 @@ class DegensacPoseEstimator(BaseEstimator):
 
         return {
             "success": True,
-            "M_0to1": Pose.from_Rt(R.squeeze(), t.squeeze()).to(pts0),
+            "M_0to1": Pose.from_Rt(R.squeeze(), t.squeeze()).to(pts0.device),
             "inliers": mask.to(pts0),
         }

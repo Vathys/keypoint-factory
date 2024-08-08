@@ -9,6 +9,8 @@ from ...geometry.epipolar import (
     T_to_F,
     asymm_epipolar_distance_all,
 )
+from ...robust_estimators import load_estimator
+from ...geometry.epipolar import relative_pose_error
 
 
 def point_distribution(logits):
@@ -17,7 +19,7 @@ def point_distribution(logits):
     proposal_logp = proposal_dist.log_prob(proposals)
 
     accept_logits = select_on_last(logits, proposals).squeeze(-1)
-    
+
     accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
     accept_samples = accept_dist.sample()
     accept_logp = accept_dist.log_prob(accept_samples)
@@ -133,7 +135,7 @@ class CycleMatcher:
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
-    
+
         dist0 = torch.norm(diff0, dim=-1)
         dist1 = torch.norm(diff1, dim=-1)
         dist = torch.max(dist0, dist1)
@@ -252,10 +254,16 @@ class Unet(torch.nn.Module):
 
         return f_bot
 
+
 def unproject(kpts, depth, cam, pose):
     batch, h, w = depth.shape
-    in_range = (0 <= kpts[:, :, 0]) & (kpts[:, :, 0] < w) & (0 <= kpts[:, :, 1]) & (kpts[:, :, 1] < h)
-    finite = torch.isfinite(kpts).all(dim = 2)
+    in_range = (
+        (0 <= kpts[:, :, 0])
+        & (kpts[:, :, 0] < w)
+        & (0 <= kpts[:, :, 1])
+        & (kpts[:, :, 1] < h)
+    )
+    finite = torch.isfinite(kpts).all(dim=2)
     valid_depth = in_range & finite
 
     valid_kpts = []
@@ -263,11 +271,11 @@ def unproject(kpts, depth, cam, pose):
         valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
     fdepth = torch.full(
         kpts.shape[:2],
-        fill_value = float('NaN'),
+        fill_value=float("NaN"),
         device=kpts.device,
         dtype=kpts.dtype,
     )
-    
+
     for b in range(batch):
         fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
 
@@ -276,10 +284,12 @@ def unproject(kpts, depth, cam, pose):
 
     return kptsw
 
+
 def project(kptsw, cam, pose):
     ext = pose.transform(kptsw)
     kpts, _ = cam.cam2image(ext)
     return kpts
+
 
 def classify_by_epipolar(data, pred, threshold=2.0):
     F_0_1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], data["T_0to1"])
@@ -315,7 +325,7 @@ def classify_by_depth(data, pred, threshold=2.0):
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
-    
+
     close0 = torch.norm(diff0, p=2, dim=-1) < threshold
     close1 = torch.norm(diff1, p=2, dim=-1) < threshold
 
@@ -340,7 +350,7 @@ class DISK(BaseModel):
         "nms_radius": 2,  # matches with disk nms radius of 5
         "max_num_keypoints": None,
         "force_num_keypoints": False,
-        "pad_if_not_divisible": False,
+        "pad_if_not_divisible": True,
         "detection_threshold": 0.005,
         "desc_dim": 128,
         "weights": None,
@@ -363,6 +373,7 @@ class DISK(BaseModel):
             "lambda_fp": -0.25,
             "lambda_kp": -0.001,
         },
+        "pose_estimator": {"estimator": "degensac", "ransac_th": 1.0},
     }
 
     requred_data_keys = ["image"]
@@ -396,8 +407,7 @@ class DISK(BaseModel):
                     Path(TRAINING_PATH) / conf.weights, map_location="cpu"
                 )
             else:
-                print("Weights not found")
-                print("Starting new checkpoint")
+                raise RuntimeError(f"Could not find weights at {conf.weights}")
 
         if state_dict:
             if "disk" in state_dict or "extractor" in state_dict:
@@ -420,7 +430,9 @@ class DISK(BaseModel):
             else:
                 model_sd = {}
                 print("Keypointfactory repo weights...")
-                state = state_dict["model"] if "model" in state_dict.keys() else state_dict
+                state = (
+                    state_dict["model"] if "model" in state_dict.keys() else state_dict
+                )
                 for k, v in state_dict["model"].items():
                     model_sd[k.replace("extractor.", "")] = v
                 missing_keys, unexpected_keys = self.load_state_dict(
@@ -457,13 +469,12 @@ class DISK(BaseModel):
         cgrid_tiled = tile(cgrid, self.conf.window_size)
 
         xys = select_on_last(
-            cgrid_tiled.repeat(b, 1, 1, 1, 1),
-            proposals.unsqueeze(1).repeat(1, 2, 1, 1)
+            cgrid_tiled.repeat(b, 1, 1, 1, 1), proposals.unsqueeze(1).repeat(1, 2, 1, 1)
         ).permute(0, 2, 3, 1)
 
         keypoints = []
         scores = []
-        
+
         for i in range(b):
             keypoints.append(xys[i][accept_mask[i]])
             scores.append(logp[i][accept_mask[i]])
@@ -616,10 +627,8 @@ class DISK(BaseModel):
 
         sample_plogp = sample_p * (sample_logp + kpts_logp)
 
-        reinforce = (elementwise_reward * sample_plogp).sum(
-            dim=(-1, -2)
-        )
-        
+        reinforce = (elementwise_reward * sample_plogp).sum(dim=(-1, -2))
+
         kp_penalty = self.lm_kp * sample_lp_flat
 
         loss = -reinforce - kp_penalty
@@ -628,6 +637,10 @@ class DISK(BaseModel):
             "total": loss,
             "reinforce": reinforce,
             "kp_penalty": kp_penalty,
+            "lm_kp": torch.tensor([self.lm_kp] * loss.shape[0], dtype=torch.float64),
+            "lm_tp": torch.tensor([self.lm_tp] * loss.shape[0], dtype=torch.float64),
+            "lm_fp": torch.tensor([self.lm_fp] * loss.shape[0], dtype=torch.float64),
+            "n_kpts": sample_lp_flat
         }
         del (
             logp0,
@@ -635,6 +648,8 @@ class DISK(BaseModel):
             sample_p,
             sample_logp,
             kpts_logp,
+            sample_lp_flat,
+            sample_plogp,
             reinforce,
             kp_penalty,
             loss,
@@ -659,7 +674,9 @@ class DISK(BaseModel):
                     device=pred["keypoints0"].device,
                 ).repeat(pred["keypoints0"].shape[0])
 
-                def get_match_metrics(kpts0, kpts1, matches):
+                def get_match_metrics(kpts0, kpts1, T, matches):
+                    results = {}
+
                     valid_indices0 = (matches[:, :, 0] >= 0) & (
                         matches[:, :, 0] < kpts0.shape[1]
                     )
@@ -681,7 +698,7 @@ class DISK(BaseModel):
                         .repeat(1, 1, 2),
                     )
 
-                    n_pairs = matches.shape[1]
+                    results["n_pairs"] = matches.shape[1]
 
                     good = classify_by_epipolar(
                         data, {"keypoints0": kpts0, "keypoints1": kpts1}
@@ -689,24 +706,74 @@ class DISK(BaseModel):
                     good = good.diagonal(dim1=-2, dim2=-1)
                     bad = ~good
 
-                    n_good = good.to(torch.int64).sum(dim=1)
-                    n_bad = bad.to(torch.int64).sum(dim=1)
-                    prec = n_good / (n_pairs + 1)
+                    results["n_good"] = good.to(torch.int64).sum(dim=1)
+                    results["n_bad"] = bad.to(torch.int64).sum(dim=1)
+                    results["prec"] = results["n_good"] / (results["n_pairs"] + 1)
 
-                    reward = (
-                        self.lm_tp * n_good + self.lm_fp * n_bad + self.lm_kp * n_kpts
+                    results["reward"] = (
+                        self.lm_tp * results["n_good"]
+                        + self.lm_fp * results["n_bad"]
+                        + self.lm_kp * n_kpts
                     )
 
-                    n_pairs = torch.tensor(
-                        [n_pairs] * kpts0.shape[0], device=kpts0.device
+                    results["n_pairs"] = torch.tensor(
+                        [results["n_pairs"]] * kpts0.shape[0], device=kpts0.device
                     )
-                    return {
-                        "n_pairs": n_pairs,
-                        "n_good": n_good,
-                        "n_bad": n_bad,
-                        "prec": prec,
-                        "reward": reward,
-                    }
+
+                    results["rel_pose_error"] = torch.tensor([], device=kpts0.device)
+                    results["ransac_inl"] = torch.tensor([], device=kpts0.device)
+                    results["ransac_inl%"] = torch.tensor([], device=kpts0.device)
+                    for b in range(kpts0.shape[0]):
+                        estimator = load_estimator(
+                            "relative_pose", self.conf.pose_estimator["estimator"]
+                        )({"ransac_th": self.conf.pose_estimator["ransac_th"]})
+                        data_ = {
+                            "m_kpts0": kpts0[b].unsqueeze(0),
+                            "m_kpts1": kpts1[b].unsqueeze(0),
+                            "camera0": data["view0"]["camera"][b],
+                            "camera1": data["view1"]["camera"][b],
+                        }
+                        est = estimator(data_)
+
+                        if not est["success"]:
+                            results["rel_pose_error"] = torch.cat(
+                                [
+                                    results["rel_pose_error"],
+                                    torch.tensor([float("inf")], device=kpts0.device),
+                                ]
+                            )
+                            results["ransac_inl"] = torch.cat(
+                                [
+                                    results["ransac_inl"],
+                                    torch.tensor([0], device=kpts0.device),
+                                ]
+                            )
+                            results["ransac_inl%"] = torch.cat(
+                                [
+                                    results["ransac_inl%"],
+                                    torch.tensor([0.0], device=kpts0.device),
+                                ]
+                            )
+                        else:
+                            # R, t, inl = ret
+                            M = est["M_0to1"]
+                            inl = est["inliers"]
+                            t_error, r_error = relative_pose_error(T[b], M.R, M.t)
+
+                            results["rel_pose_error"] = torch.cat(
+                                [
+                                    results["rel_pose_error"],
+                                    max(r_error, t_error).unsqueeze(0),
+                                ]
+                            )
+                            results["ransac_inl"] = torch.cat(
+                                [results["ransac_inl"], torch.sum(inl).unsqueeze(0)]
+                            )
+                            results["ransac_inl%"] = torch.cat(
+                                [results["ransac_inl%"], torch.mean(inl).unsqueeze(0)]
+                            )
+
+                    return results
 
                 metrics = {
                     "n_kpts": n_kpts,
@@ -717,8 +784,12 @@ class DISK(BaseModel):
                 kpts0 = pred["keypoints0"]
                 kpts1 = pred["keypoints1"]
 
-                desc_metrics = get_match_metrics(kpts0, kpts1, desc_matches)
-                depth_metrics = get_match_metrics(kpts0, kpts1, depth_matches)
+                desc_metrics = get_match_metrics(
+                    kpts0, kpts1, data["T_0to1"], desc_matches
+                )
+                depth_metrics = get_match_metrics(
+                    kpts0, kpts1, data["T_0to1"], depth_matches
+                )
 
                 metrics = {
                     **metrics,

@@ -150,7 +150,7 @@ def cal_error_auc(errors, thresholds):
 
 
 class AUCMetric:
-    def __init__(self, thresholds, elements=None):
+    def __init__(self, thresholds, elements=[]):
         self._elements = elements
         self.thresholds = thresholds
         if not isinstance(thresholds, list):
@@ -164,7 +164,7 @@ class AUCMetric:
         if len(self._elements) == 0:
             return np.nan
         else:
-            return cal_error_auc(self._elements, self.thresholds)
+            return np.mean(cal_error_auc(self._elements, self.thresholds))
 
 
 class Timer(object):
