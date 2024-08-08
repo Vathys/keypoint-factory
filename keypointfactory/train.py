@@ -33,6 +33,7 @@ from .utils.tools import (
     MedianMetric,
     PRMetric,
     RecallMetric,
+    AUCMetric,
     fork_rng,
     set_seed,
 )
@@ -68,6 +69,7 @@ default_train_conf = {
     "median_metrics": [],  # add the median of some metrics
     "recall_metrics": {},  # add the recall of some metrics
     "pr_metrics": {},  # add pr curves, set labels/predictions/mask keys
+    "auc_metrics": {},  # add auc curves, for each metric set thresholds and bins
     "best_key": "loss/total",  # key to use to select the best checkpoint
     "dataset_callback_fn": None,  # data func called at the start of each epoch
     "dataset_callback_on_val": False,  # call data func on val data?
@@ -80,21 +82,25 @@ default_train_conf = OmegaConf.create(default_train_conf)
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
-model_og = TripletPipeline({
-    "extractor": {
-        "name": "disk_kornia",
-        "max_num_keypoints": None,
-        "force_num_keypoints": True,
-        "detection_threshold": 0.0,
-        "trainable": False,
-    },
-    "batch_triplets": False,
-})
+model_og = TripletPipeline(
+    {
+        "extractor": {
+            "name": "disk",
+            "max_num_keypoints": None,
+            "force_num_keypoints": True,
+            "detection_threshold": 0.0,
+            "trainable": False,
+            "weights": "weights/depth-save.pth",
+        },
+        "batch_triplets": False,
+    }
+)
+
 
 @torch.no_grad()
 def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
     model.eval()
-    
+
     global model_og
     model_og = model_og.to(device)
 
@@ -113,8 +119,14 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
             pred_og = model_og(data)
             losses, metrics = loss_fn(pred, data)
             if conf.plot is not None and i in plot_ids:
-                figures.append(locate(plot_fn)(pred, data))
-                figures.append(locate(plot_fn)(pred_og, data))
+                figures.append(
+                    locate(plot_fn)(pred, data, n_pairs=data["view0"]["image"].shape[0])
+                )
+                figures.append(
+                    locate(plot_fn)(
+                        pred_og, data, n_pairs=data["view0"]["image"].shape[0]
+                    )
+                )
 
             # add PR curves
             for k, v in conf.pr_curves.items():
@@ -133,12 +145,17 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
                 if k in conf.recall_metrics.keys():
                     q = conf.recall_metrics[k]
                     results[k + f"_recall{int(q)}"] = RecallMetric(q)
+                if k in conf.auc_metrics.keys():
+                    ths = OmegaConf.to_object(conf.auc_metrics[k])
+                    results[k + "_auc"] = AUCMetric(thresholds=ths)
             results[k].update(v)
             if k in conf.median_metrics:
                 results[k + "_median"].update(v)
             if k in conf.recall_metrics.keys():
                 q = conf.recall_metrics[k]
                 results[k + f"_recall{int(q)}"].update(v)
+            if k in conf.auc_metrics.keys():
+                results[k + "_auc"].update(v)
         del numbers
     results = {k: results[k].compute() for k in results}
     return results, {k: v.compute() for k, v in pr_metrics.items()}, figures
