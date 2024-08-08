@@ -640,6 +640,7 @@ class DISK(BaseModel):
             "lm_kp": torch.tensor([self.lm_kp] * loss.shape[0], dtype=torch.float64),
             "lm_tp": torch.tensor([self.lm_tp] * loss.shape[0], dtype=torch.float64),
             "lm_fp": torch.tensor([self.lm_fp] * loss.shape[0], dtype=torch.float64),
+            "n_kpts": sample_lp_flat
         }
         del (
             logp0,

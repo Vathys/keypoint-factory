@@ -65,8 +65,6 @@ def make_hm_plot(pred_, data_, n_pairs=2):
                     torch.sigmoid(pred["heatmap1"][i, 0]),
                 ]
             )
-        elif "depth" in view0.keys() and view0["depth"] is not None:
-            heatmaps.append([view0["depth"][i], view1["depth"][i]])
 
     fig, axes = plot_image_grid(images, return_fig=True, set_lim=True)
     if len(heatmaps) > 0:
