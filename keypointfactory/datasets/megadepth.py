@@ -22,6 +22,7 @@ from .base_dataset import BaseDataset
 from .utils import rotate_intrinsics, rotate_pose_inplane, scale_intrinsics
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 scene_lists_path = Path(__file__).parent / "megadepth_scene_lists"
 
 
@@ -365,7 +366,7 @@ class _PairDataset(torch.utils.data.Dataset):
 
 class _TripletDataset(_PairDataset):
     def sample_new_items(self, seed):
-        logging.info("Sampling new triplets with seed %d", seed)
+        logger.info("Sampling new %s triplets with seed %d", self.split, seed)
         self.items = []
         split = self.split
         num = self.conf[self.split + "_num_per_scene"]
