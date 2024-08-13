@@ -1,10 +1,9 @@
 import pandas as pd
-
 from omegaconf import OmegaConf
 
 
 def load_eval(dir):
-    results = pd.read_hdf(str(dir / "results.h5"), key="results", mode='r')
+    results = pd.read_hdf(str(dir / "results.h5"), key="results", mode="r")
     summaries = pd.read_json(str(dir / "summaries.json"), orient="records")
     return summaries, results
 
@@ -13,9 +12,7 @@ def save_eval(dir, summaries, figures, results):
     results.to_hdf(
         str(dir / "results.h5"), key="results", mode="w", format="fixed", index="False"
     )
-    summaries.to_json(
-        str(dir / "summaries.json"), orient="records", indent=4, mode="w"
-    )
+    summaries.to_json(str(dir / "summaries.json"), orient="records", indent=4, mode="w")
     for fig_name, fig in figures.items():
         fig.savefig(dir / f"{fig_name}.png")
 

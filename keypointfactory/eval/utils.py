@@ -1,8 +1,9 @@
 import numpy as np
+import pandas as pd
 import torch
 from kornia.geometry.homography import find_homography_dlt
-import pandas as pd
 
+from ..geometry.depth import project, sample_depth
 from ..geometry.epipolar import generalized_epi_dist, relative_pose_error
 from ..geometry.gt_generation import IGNORE_FEATURE
 from ..geometry.homography import (
@@ -11,11 +12,10 @@ from ..geometry.homography import (
     warp_points_torch,
 )
 from ..geometry.utils import div0
+from ..models.utils.misc import distance_matrix
 from ..robust_estimators import load_estimator
 from ..utils.tensor import index_batch, map_tensor
 from ..utils.tools import AUCMetric
-from ..models.utils.misc import distance_matrix
-from ..geometry.depth import sample_depth, project
 
 
 def check_keys_recursive(d, pattern):
@@ -30,7 +30,11 @@ def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
     def compute_correctness_single(kpts, kpts_w):
         dist = torch.norm(kpts_w[:, None] - kpts[None], dim=-1)
         if dist.shape[0] == 0 or dist.shape[1] == 0:
-            return torch.Tensor(dist.shape), torch.Tensor(dist.shape), torch.Tensor(dist.shape)
+            return (
+                torch.Tensor(dist.shape),
+                torch.Tensor(dist.shape),
+                torch.Tensor(dist.shape),
+            )
         min_dist, matches = dist.min(dim=1)
         correct = min_dist <= thresh
         if mutual:
@@ -600,7 +604,7 @@ def get_depth_matches(kpts0, kpts1, depth0, depth1, camera0, camera1, T_0to1):
 def get_desc_matches(kpts0, kpts1, desc0, desc1):
     if kpts0.shape[1] == 0 or kpts1.shape[1] == 0:
         return torch.Tensor(kpts0.shape), torch.Tensor(kpts1.shape)
-    
+
     distances = distance_matrix(
         desc0,
         desc1,

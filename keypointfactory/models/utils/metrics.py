@@ -1,5 +1,6 @@
 import torch
-from ...geometry.depth import sample_depth, project
+
+from ...geometry.depth import project, sample_depth
 
 
 @torch.no_grad()

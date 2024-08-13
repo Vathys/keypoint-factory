@@ -1,10 +1,11 @@
-import torch
 import pydegensac
-from ...geometry.wrappers import Pose
-from ...geometry.epipolar import F_to_E
-from ..base_estimator import BaseEstimator
+import torch
 from kornia.geometry.epipolar import motion_from_essential_choose_solution
+
 from ... import logger
+from ...geometry.epipolar import F_to_E
+from ...geometry.wrappers import Pose
+from ..base_estimator import BaseEstimator
 
 
 class DegensacPoseEstimator(BaseEstimator):

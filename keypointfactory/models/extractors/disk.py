@@ -1,16 +1,17 @@
-import torch
 from pathlib import Path
 
-from ...settings import DATA_PATH, TRAINING_PATH
-from ..base_model import BaseModel
-from ..utils.blocks import get_module
-from ..utils.misc import pad_and_stack, distance_matrix, tile, select_on_last
+import torch
+
 from ...geometry.epipolar import (
     T_to_F,
     asymm_epipolar_distance_all,
+    relative_pose_error,
 )
 from ...robust_estimators import load_estimator
-from ...geometry.epipolar import relative_pose_error
+from ...settings import DATA_PATH, TRAINING_PATH
+from ..base_model import BaseModel
+from ..utils.blocks import get_module
+from ..utils.misc import distance_matrix, pad_and_stack, select_on_last, tile
 
 
 def point_distribution(logits):
@@ -430,9 +431,6 @@ class DISK(BaseModel):
             else:
                 model_sd = {}
                 print("Keypointfactory repo weights...")
-                state = (
-                    state_dict["model"] if "model" in state_dict.keys() else state_dict
-                )
                 for k, v in state_dict["model"].items():
                     model_sd[k.replace("extractor.", "")] = v
                 missing_keys, unexpected_keys = self.load_state_dict(
@@ -640,7 +638,7 @@ class DISK(BaseModel):
             "lm_kp": torch.tensor([self.lm_kp] * loss.shape[0], dtype=torch.float64),
             "lm_tp": torch.tensor([self.lm_tp] * loss.shape[0], dtype=torch.float64),
             "lm_fp": torch.tensor([self.lm_fp] * loss.shape[0], dtype=torch.float64),
-            "n_kpts": sample_lp_flat
+            "n_kpts": sample_lp_flat,
         }
         del (
             logp0,

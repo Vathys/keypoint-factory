@@ -1,7 +1,7 @@
 import torch
 
-from ..utils.tensor import batch_to_device
 from ..models.utils.metrics import compute_correct_depth
+from ..utils.tensor import batch_to_device
 from .viz2d import cm_RdGn, plot_heatmaps, plot_image_grid, plot_keypoints, plot_matches
 
 

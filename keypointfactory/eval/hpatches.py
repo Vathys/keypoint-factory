@@ -15,9 +15,7 @@ from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
-from .utils import (
-    eval_pair_homography,
-)
+from .utils import eval_pair_homography
 
 
 def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):

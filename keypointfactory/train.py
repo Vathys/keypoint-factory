@@ -9,7 +9,7 @@ import copy
 import re
 import shutil
 import signal
-from collections import defaultdict, Counter
+from collections import defaultdict
 from pathlib import Path
 from pydoc import locate
 
@@ -27,17 +27,16 @@ from .models import get_model
 from .settings import EVAL_PATH, TRAINING_PATH
 from .utils.experiments import get_best_checkpoint, get_last_checkpoint, save_experiment
 from .utils.stdout_capturing import capture_outputs
-from .utils.tensor import batch_to_device, map_tensor_filtered, gather_tensor
+from .utils.tensor import batch_to_device, gather_tensor, map_tensor_filtered
 from .utils.tools import (
+    AUCMetric,
     AverageMetric,
     MedianMetric,
     PRMetric,
     RecallMetric,
-    AUCMetric,
     fork_rng,
     set_seed,
 )
-from .models.triplet_pipeline import TripletPipeline
 
 # @TODO: Fix pbar pollution in logs
 # @TODO: add plotting during evaluation

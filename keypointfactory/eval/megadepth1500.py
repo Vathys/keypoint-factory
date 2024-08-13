@@ -1,13 +1,13 @@
 import logging
 import zipfile
-from typing import Iterable
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
+from typing import Iterable
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -20,7 +20,6 @@ from ..utils.tensor import map_tensor
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_pair_depth, eval_relative_pose_robust
-
 
 logger = logging.getLogger(__name__)
 

@@ -4,9 +4,9 @@ Simply load images from a folder or nested folders (does not have any split).
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
-import h5py
 
 from ..geometry.wrappers import Camera, Pose
 from ..settings import DATA_PATH
@@ -62,7 +62,7 @@ class ImagePairs(BaseDataset, torch.utils.data.Dataset):
     def _read_view(self, name):
         img_path = DATA_PATH / self.conf.root / "images" / name
         depth_path = DATA_PATH / self.conf.root / "depths" / name.replace(".jpg", ".h5")
-        
+
         img = load_image(img_path)
         data = self.preprocessor(img)
 

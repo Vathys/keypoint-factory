@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..utils.misc import size_is_pow2, cut_to_match
+from ..utils.misc import cut_to_match, size_is_pow2
 
 
 def get_module(classname):
@@ -77,7 +77,12 @@ class Upsample(nn.Module):
             get_module(conf.arch.norm)(n_features),
             get_module(conf.arch.gate)(n_features),
             nn.ConvTranspose2d(
-                n_features, n_features, size, stride=2, padding=2, output_padding=1,
+                n_features,
+                n_features,
+                size,
+                stride=2,
+                padding=2,
+                output_padding=1,
             ),
         )
 
