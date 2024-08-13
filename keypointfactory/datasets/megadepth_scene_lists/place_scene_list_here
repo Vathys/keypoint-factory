@@ -1,0 +1,8 @@
+place here a .txt file with a list of scenes
+make sure to place in configs:
+
+{
+    "train_split": "..."
+    "val_split": "..."
+    "test_split": "..."
+}

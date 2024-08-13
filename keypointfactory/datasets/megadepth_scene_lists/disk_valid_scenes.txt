@@ -1,1 +1,0 @@
-/cluster/project/infk/cvg/local_features_data/megadepth/disk_valid_scenes.txt
