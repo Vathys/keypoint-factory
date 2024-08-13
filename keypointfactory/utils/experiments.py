@@ -116,6 +116,7 @@ def save_experiment(
         "lr_scheduler": lr_scheduler.state_dict(),
         "conf": OmegaConf.to_container(conf, resolve=True),
         "epoch": epoch,
+        "step": iter_i,
         "losses": losses,
         "eval": results,
     }

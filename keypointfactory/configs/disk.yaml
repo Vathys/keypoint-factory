@@ -1,32 +1,21 @@
 model:
     name: two_view_pipeline
     extractor:
-        name: extractors.disk_kornia
+        name: extractors.disk
         max_num_keypoints: 2048
         detection_threshold: 0.0
+        nms_radius: 2
+        force_num_keypoints: true
 
 benchmarks:
     hpatches:
         eval:
-            estimator: opencv
-            ransac_th: 0.5
-        model:
-            extractor:
-                max_num_keypoints: 2048  # overwrite config above
-            matcher:
-                name: matchers.homography_matcher
-                th_positive: 3.0
-                th_negative: 3.0
-    megadepth:
-        eval: 
-            estimator: opencv
-            ransac_th: 0.5
-        model:
-            extractor:
-                max_num_keypoints: 1024
-            matcher:
-                name: matchers.depth_matcher
-                th_positive: 3.0
-                th_negative: 5.0
-                th_epi: None
-                th_consistency: None
+            top_k_thresholds: 2048
+            top_k_by: scores
+    megadepth1500:
+        eval:
+            top_k_thresholds: 2048
+            top_k_by: scores
+            estimator: degensac
+            ransac_th: 1.0
+            use_depth: False

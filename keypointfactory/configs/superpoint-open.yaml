@@ -9,25 +9,12 @@ model:
 benchmarks:
     hpatches:
         eval:
-            estimator: opencv
-            ransac_th: 0.5
-        model:
-            extractor:
-                max_num_keypoints: 2048  # overwrite config above
-            matcher:
-                name: matchers.homography_matcher
-                th_positive: 3.0
-                th_negative: 3.0
-    megadepth:
+            top_k_thresholds: 2048
+            top_k_by: scores
+    megadepth1500:
         eval: 
-            estimator: opencv
-            ransac_th: 0.5
-        model:
-            extractor:
-                max_num_keypoints: 1024
-            matcher:
-                name: matchers.depth_matcher
-                th_positive: 3.0
-                th_negative: 5.0
-                th_epi: None
-                th_consistency: None
+            top_k_thresholds: 2048
+            top_k_by: scores
+            estimator: degensac
+            ransac_th: 1.0
+            use_depth: False

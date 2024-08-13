@@ -82,27 +82,10 @@ default_train_conf = OmegaConf.create(default_train_conf)
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
-model_og = TripletPipeline(
-    {
-        "extractor": {
-            "name": "disk",
-            "max_num_keypoints": None,
-            "force_num_keypoints": True,
-            "detection_threshold": 0.0,
-            "trainable": False,
-            "weights": "weights/depth-save.pth",
-        },
-        "batch_triplets": False,
-    }
-)
-
 
 @torch.no_grad()
 def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
     model.eval()
-
-    global model_og
-    model_og = model_og.to(device)
 
     results = {}
     pr_metrics = defaultdict(PRMetric)
@@ -116,16 +99,10 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
         data = batch_to_device(data, device, non_blocking=True)
         with torch.no_grad():
             pred = model(data)
-            pred_og = model_og(data)
             losses, metrics = loss_fn(pred, data)
             if conf.plot is not None and i in plot_ids:
                 figures.append(
                     locate(plot_fn)(pred, data, n_pairs=data["view0"]["image"].shape[0])
-                )
-                figures.append(
-                    locate(plot_fn)(
-                        pred_og, data, n_pairs=data["view0"]["image"].shape[0]
-                    )
                 )
 
             # add PR curves
