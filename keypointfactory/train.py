@@ -375,7 +375,6 @@ def training(rank, conf, output_dir, args):
         )
         prof.__enter__()
 
-    image_names = []
     while epoch < conf.train.epochs and not stop:
         if rank == 0:
             logger.info(f"Starting epoch {epoch}")
@@ -442,12 +441,6 @@ def training(rank, conf, output_dir, args):
             if it % substep_ == substep_ - 1:
                 optimizer.zero_grad()
 
-            def filter_func(key):
-                if key.startswith("keypoint_scores") or key.startswith("descriptors"):
-                    return True
-                else:
-                    return False
-
             with autocast(enabled=args.mixed_precision is not None, dtype=mp_dtype):
                 data = batch_to_device(data, device, non_blocking=True)
                 model._pre_loss_callback(conf.train.seed, epoch)
@@ -457,7 +450,7 @@ def training(rank, conf, output_dir, args):
                 detached_pred = map_tensor_filtered(
                     pred,
                     lambda x: x.detach().requires_grad_(),
-                    filter_func,
+                    model._detach_grad_filter,
                 )
                 losses, _ = loss_fn(detached_pred, data)
                 loss = torch.sum(losses["total"])
@@ -479,8 +472,8 @@ def training(rank, conf, output_dir, args):
                 for sloss in losses["total"]:
                     scaler.scale(sloss).backward(retain_graph=True)
 
-                leaves = gather_tensor(pred, filter_func)
-                grads = gather_tensor(detached_pred, filter_func)
+                leaves = gather_tensor(pred, model._detach_grad_filter)
+                grads = gather_tensor(detached_pred, model._detach_grad_filter)
                 leaves = [leaf for leaf in leaves if leaf.numel() > 0]
                 grads = [grad.grad for grad in grads if grad.numel() > 0]
 

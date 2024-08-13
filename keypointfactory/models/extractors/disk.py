@@ -800,3 +800,9 @@ class DISK(BaseModel):
             metrics = {}
 
         return losses, metrics
+
+    def _detach_grad_filter(self, key):
+        if key.startswith("keypoint_scores") or key.startswith("descriptors"):
+            return True
+        else:
+            return False
