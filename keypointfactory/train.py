@@ -27,8 +27,9 @@ from .models import get_model
 from .settings import EVAL_PATH, TRAINING_PATH
 from .utils.experiments import get_best_checkpoint, get_last_checkpoint, save_experiment
 from .utils.stdout_capturing import capture_outputs
-from .utils.tensor import batch_to_device
+from .utils.tensor import batch_to_device, gather_tensor, map_tensor_filtered
 from .utils.tools import (
+    AUCMetric,
     AverageMetric,
     MedianMetric,
     PRMetric,
@@ -55,6 +56,7 @@ default_train_conf = {
         "factor": 1.0,
         "options": {},  # add lr_scheduler arguments here
     },
+    "warmup": 500,
     "lr_scaling": [(100, ["dampingnet.const"])],
     "eval_every_iter": 1000,  # interval for evaluation on the validation set
     "save_every_iter": 5000,  # interval for saving the current checkpoint
@@ -66,6 +68,7 @@ default_train_conf = {
     "median_metrics": [],  # add the median of some metrics
     "recall_metrics": {},  # add the recall of some metrics
     "pr_metrics": {},  # add pr curves, set labels/predictions/mask keys
+    "auc_metrics": {},  # add auc curves, for each metric set thresholds and bins
     "best_key": "loss/total",  # key to use to select the best checkpoint
     "dataset_callback_fn": None,  # data func called at the start of each epoch
     "dataset_callback_on_val": False,  # call data func on val data?
@@ -76,10 +79,13 @@ default_train_conf = {
 }
 default_train_conf = OmegaConf.create(default_train_conf)
 
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 
 @torch.no_grad()
 def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
     model.eval()
+
     results = {}
     pr_metrics = defaultdict(PRMetric)
     figures = []
@@ -94,7 +100,10 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
             pred = model(data)
             losses, metrics = loss_fn(pred, data)
             if conf.plot is not None and i in plot_ids:
-                figures.append(locate(plot_fn)(pred, data))
+                figures.append(
+                    locate(plot_fn)(pred, data, n_pairs=data["view0"]["image"].shape[0])
+                )
+
             # add PR curves
             for k, v in conf.pr_curves.items():
                 pr_metrics[k].update(
@@ -112,12 +121,17 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
                 if k in conf.recall_metrics.keys():
                     q = conf.recall_metrics[k]
                     results[k + f"_recall{int(q)}"] = RecallMetric(q)
+                if k in conf.auc_metrics.keys():
+                    ths = OmegaConf.to_object(conf.auc_metrics[k])
+                    results[k + "_auc"] = AUCMetric(thresholds=ths)
             results[k].update(v)
             if k in conf.median_metrics:
                 results[k + "_median"].update(v)
             if k in conf.recall_metrics.keys():
                 q = conf.recall_metrics[k]
                 results[k + f"_recall{int(q)}"].update(v)
+            if k in conf.auc_metrics.keys():
+                results[k + "_auc"].update(v)
         del numbers
     results = {k: results[k].compute() for k in results}
     return results, {k: v.compute() for k, v in pr_metrics.items()}, figures
@@ -359,6 +373,7 @@ def training(rank, conf, output_dir, args):
             with_stack=True,
         )
         prof.__enter__()
+
     while epoch < conf.train.epochs and not stop:
         if rank == 0:
             logger.info(f"Starting epoch {epoch}")
@@ -417,58 +432,86 @@ def training(rank, conf, output_dir, args):
                 # We normalize the x-axis of tensorflow to num samples!
                 tot_n_samples *= train_loader.batch_size
 
+            if conf.train.warmup is not None and epoch == 0 and it > conf.train.warmup:
+                break
+
             model.train()
-            optimizer.zero_grad()
+            substep_ = conf.train.get("substep", 1)
+            if it % substep_ == substep_ - 1:
+                optimizer.zero_grad()
 
             with autocast(enabled=args.mixed_precision is not None, dtype=mp_dtype):
                 data = batch_to_device(data, device, non_blocking=True)
+                model._pre_loss_callback(conf.train.seed, epoch)
                 pred = model(data)
-                losses, _ = loss_fn(pred, data)
-                loss = torch.mean(losses["total"])
+                # in the original disk, only the descriptors and keypoint scores are
+                # detached. I'm not sure why this is?
+                detached_pred = map_tensor_filtered(
+                    pred,
+                    lambda x: x.detach().requires_grad_(),
+                    model._detach_grad_filter,
+                )
+                losses, _ = loss_fn(detached_pred, data)
+                loss = torch.sum(losses["total"])
+                model._post_loss_callback(conf.train.seed, epoch)
             if torch.isnan(loss).any():
                 print(f"Detected NAN, skipping iteration {it}")
                 del pred, data, loss, losses
                 continue
 
-            do_backward = loss.requires_grad
+            do_backward = losses["total"].requires_grad
             if args.distributed:
                 do_backward = torch.tensor(do_backward).float().to(device)
                 torch.distributed.all_reduce(
                     do_backward, torch.distributed.ReduceOp.PRODUCT
                 )
                 do_backward = do_backward > 0
+
             if do_backward:
-                scaler.scale(loss).backward()
-                if args.detect_anomaly:
-                    # Check for params without any gradient which causes
-                    # problems in distributed training with checkpointing
-                    detected_anomaly = False
-                    for name, param in model.named_parameters():
-                        if param.grad is None and param.requires_grad:
-                            print(f"param {name} has no gradient.")
-                            detected_anomaly = True
-                    if detected_anomaly:
-                        raise RuntimeError("Detected anomaly in training.")
-                if conf.train.get("clip_grad", None):
-                    scaler.unscale_(optimizer)
-                    try:
-                        torch.nn.utils.clip_grad_norm_(
-                            all_params,
-                            max_norm=conf.train.clip_grad,
-                            error_if_nonfinite=True,
-                        )
+                for sloss in losses["total"]:
+                    scaler.scale(sloss).backward(retain_graph=True)
+
+                leaves = gather_tensor(pred, model._detach_grad_filter)
+                grads = gather_tensor(detached_pred, model._detach_grad_filter)
+                leaves = [leaf for leaf in leaves if leaf.numel() > 0]
+                grads = [grad.grad for grad in grads if grad.numel() > 0]
+
+                torch.autograd.backward(leaves, grads, retain_graph=True)
+                del leaves, grads
+
+                if it % substep_ == substep_ - 1:
+                    if args.detect_anomaly:
+                        # Check for params without any gradient which causes
+                        # problems in distributed training with checkpointing
+                        detected_anomaly = False
+                        for name, param in model.named_parameters():
+                            if param.grad is None and param.requires_grad:
+                                print(f"param {name} has no gradient.")
+                                detected_anomaly = True
+                        if detected_anomaly:
+                            raise RuntimeError("Detected anomaly in training.")
+                    if conf.train.get("clip_grad", None):
+                        scaler.unscale_(optimizer)
+                        try:
+                            torch.nn.utils.clip_grad_norm_(
+                                all_params,
+                                max_norm=conf.train.clip_grad,
+                                error_if_nonfinite=True,
+                            )
+                            scaler.step(optimizer)
+                        except RuntimeError:
+                            logger.warning(
+                                "NaN detected in gradients. Skipping iteration."
+                            )
+                        scaler.update()
+                    else:
                         scaler.step(optimizer)
-                    except RuntimeError:
-                        logger.warning("NaN detected in gradients. Skipping iteration.")
-                    scaler.update()
+                        scaler.update()
+                    if not conf.train.lr_schedule.on_epoch:
+                        lr_scheduler.step()
                 else:
-                    scaler.step(optimizer)
-                    scaler.update()
-                if not conf.train.lr_schedule.on_epoch:
-                    lr_scheduler.step()
-            else:
-                if rank == 0:
-                    logger.warning(f"Skip iteration {it} due to detach.")
+                    if rank == 0:
+                        logger.warning(f"Skip iteration {it} due to detach.")
 
             if args.profile:
                 prof.step()

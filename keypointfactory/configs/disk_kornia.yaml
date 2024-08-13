@@ -1,13 +1,11 @@
 model:
     name: two_view_pipeline
     extractor:
-        name: extractors.sift
-        detector: pycolmap_cuda
+        name: extractors.disk_kornia
         max_num_keypoints: 2048
-        detection_threshold: 0.00666666
-        nms_radius: -1
-        pycolmap_options:
-            first_octave: -1
+        detection_threshold: 0.0
+        nms_window_size: 5
+        force_num_keypoints: true
 
 benchmarks:
     hpatches:

@@ -72,6 +72,28 @@ def sym_epipolar_distance_all(p0, p1, E, eps=1e-15):
     return (d0 + d1) / 2
 
 
+def asymm_epipolar_distance_all(p0, p1, F):
+    """Compute batched asymmetric epipolar distances.
+    Args:
+        p0, p1: batched tensors of N 2D points of size (..., N, 2).
+        F: fundamental matrices from camera 0 to camera 1, size (..., 3, 3).
+    Returns:
+        The asymmetric epipolar distance of each point-pair: (..., N).
+    """
+    if p0.shape[-2] == 0:
+        p0 = torch.zeros((*p0.shape[:-2], 1, p0.shape[-1])).to(p0.dtype)
+    if p1.shape[-2] == 0:
+        p1 = torch.zeros((*p1.shape[:-2], 1, p1.shape[-1])).to(p1.dtype)
+    if p0.shape[-1] != 3:
+        p0 = to_homogeneous(p0)
+    if p1.shape[-1] != 3:
+        p1 = to_homogeneous(p1)
+    Ft_p1 = torch.einsum("...ij,...mi->...mj", F, p1.to(F))
+    norm = torch.norm(Ft_p1[..., :2], p=2, dim=-1).clamp(min=1e-6)
+    dist = torch.einsum("...ij,...nj->...ni", Ft_p1 / norm[..., None], p0.to(F))
+    return dist
+
+
 def generalized_epi_dist(
     kpts0, kpts1, cam0: Camera, cam1: Camera, T_0to1: Pose, all=True, essential=True
 ):

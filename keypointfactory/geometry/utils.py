@@ -170,9 +170,13 @@ def get_image_coords(img):
 def div0(a, b):
     c = torch.true_divide(a, b)
     if torch.numel(c) == 1:
-        c = c if torch.isfinite(c) else (1 if a == 0 else 0)
+        c = (
+            c
+            if torch.isfinite(c)
+            else (torch.tensor(1.0) if a > 0 and b == 0 else torch.tensor(0.0))
+        )
     else:
         idx = ~torch.isfinite(c)
-        c[idx] = torch.where(a[idx] == 0, 1, 0)
+        c[idx] = torch.where((a[idx] > 0) & (b[idx] == 0), 1.0, 0.0)
 
     return c

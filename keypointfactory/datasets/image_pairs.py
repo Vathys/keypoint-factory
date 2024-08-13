@@ -4,6 +4,7 @@ Simply load images from a folder or nested folders (does not have any split).
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
 
@@ -59,9 +60,22 @@ class ImagePairs(BaseDataset, torch.utils.data.Dataset):
         return self
 
     def _read_view(self, name):
-        path = DATA_PATH / self.conf.root / name
-        img = load_image(path)
-        return self.preprocessor(img)
+        img_path = DATA_PATH / self.conf.root / "images" / name
+        depth_path = DATA_PATH / self.conf.root / "depths" / name.replace(".jpg", ".h5")
+
+        img = load_image(img_path)
+        data = self.preprocessor(img)
+
+        if depth_path.exists():
+            with h5py.File(str(depth_path), "r") as f:
+                depth = f["/depth"].__array__().astype(np.float32, copy=False)
+                depth = torch.Tensor(depth)[None]
+            assert depth.shape[-2:] == img.shape[-2:]
+            data["depth"] = self.preprocessor(depth, interpolation="nearest")["image"][
+                0
+            ]
+
+        return data
 
     def __getitem__(self, idx):
         line = self.items[idx]

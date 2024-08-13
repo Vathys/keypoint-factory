@@ -11,7 +11,7 @@ If no triplet is found, this falls back to two_view_pipeline.py
 
 import torch
 
-from ..utils.misc import get_twoview, stack_twoviews, unstack_twoviews
+from ..utils.misc import get_twoview, stack_twoviews
 from .two_view_pipeline import TwoViewPipeline
 
 
@@ -35,46 +35,31 @@ class TripletPipeline(TwoViewPipeline):
         pred2 = self.extract_view(data, "2")
 
         pred = {}
-        pred = {
+        all_pred = {
             **{k + "0": v for k, v in pred0.items()},
             **{k + "1": v for k, v in pred1.items()},
             **{k + "2": v for k, v in pred2.items()},
         }
 
-        def predict_twoview(pred, data):
-            # forward pass
-            if self.conf.matcher.name:
-                pred = {**pred, **self.matcher({**data, **pred})}
+        for idx in ["0to1", "0to2", "1to2"]:
+            pred[idx] = get_twoview(all_pred, idx)
 
-            if self.conf.filter.name:
-                pred = {**pred, **self.filter({**m_data, **pred})}
-
-            if self.conf.solver.name:
-                pred = {**pred, **self.solver({**m_data, **pred})}
-            return pred
-
-        if self.conf.batch_triplets:
-            B = data["image1"].shape[0]
-            # stack on batch dimension
-            m_data = stack_twoviews(data)
-            m_pred = stack_twoviews(pred)
-
-            # forward pass
-            m_pred = predict_twoview(m_pred, m_data)
-
-            # unstack
-            pred = {**pred, **unstack_twoviews(m_pred, B)}
-        else:
-            for idx in ["0to1", "0to2", "1to2"]:
-                m_data = get_twoview(data, idx)
-                m_pred = get_twoview(pred, idx)
-                pred[idx] = predict_twoview(m_pred, m_data)
         return pred
+
+    def _pre_loss_callback(self, seed, epoch):
+        super()._pre_loss_callback(seed, epoch)
+
+    def _post_loss_callback(self, seed, epoch):
+        super()._post_loss_callback(seed, epoch)
+
+    def _detach_grad_filter(self, key):
+        super()._detach_grad_filter(key)
 
     def loss(self, pred, data):
         if not has_triplet(data):
             return super().loss(pred, data)
         if self.conf.batch_triplets:
+            # TODO: stacking doesn't work for Pose and Camera wrappers.
             m_data = stack_twoviews(data)
             m_pred = stack_twoviews(pred)
             losses, metrics = super().loss(m_pred, m_data)
@@ -87,13 +72,18 @@ class TripletPipeline(TwoViewPipeline):
                 losses_i, metrics_i = super().loss(pred_i, data_i)
                 for k, v in losses_i.items():
                     if k in losses.keys():
-                        losses[k] = losses[k] + v
+                        losses[k].append(v)
                     else:
-                        losses[k] = v
+                        losses[k] = [v]
                 for k, v in metrics_i.items():
                     if k in metrics.keys():
-                        metrics[k] = torch.cat([metrics[k], v], 0)
+                        metrics[k].append(v)
                     else:
-                        metrics[k] = v
+                        metrics[k] = [v]
+
+        for k in losses.keys():
+            losses[k] = torch.cat(losses[k], 0)
+        for k in metrics.keys():
+            metrics[k] = torch.cat(metrics[k], 0)
 
         return losses, metrics

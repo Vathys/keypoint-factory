@@ -24,10 +24,8 @@ class TwoViewPipeline(BaseModel):
             "name": None,
             "trainable": False,
         },
-        "matcher": {"name": None},
         "filter": {"name": None},
         "solver": {"name": None},
-        "ground_truth": {"name": None},
         "allow_no_extract": False,
         "run_gt_in_forward": False,
     }
@@ -69,6 +67,36 @@ class TwoViewPipeline(BaseModel):
             pred_i = {**pred_i, **self.extractor({**data_i, **pred_i})}
         return pred_i
 
+    def _pre_loss_callback(self, seed, epoch):
+        super()._pre_loss_callback(seed, epoch)
+
+        if self.conf.extractor.name:
+            self.extractor._pre_loss_callback(seed, epoch)
+        if self.conf.filter.name:
+            self.filter._pre_loss_callback(seed, epoch)
+        if self.conf.solver.name:
+            self.solver._pre_loss_callback(seed, epoch)
+
+    def _post_loss_callback(self, seed, epoch):
+        super()._post_loss_callback(seed, epoch)
+
+        if self.conf.extractor.name:
+            self.extractor._post_loss_callback(seed, epoch)
+        if self.conf.filter.name:
+            self.filter._post_loss_callback(seed, epoch)
+        if self.conf.solver.name:
+            self.solver._post_loss_callback(seed, epoch)
+
+    def _detach_grad_filter(self, key):
+        detach = True
+        if self.conf.extractor.name:
+            detach = detach and self.extractor._detach_grad_filter(key)
+        if self.conf.filter.name:
+            detach = detach and self.filter._detach_grad_filter(key)
+        if self.conf.solver.name:
+            detach = detach and self.solver._detach_grad_filter(key)
+        return detach
+
     def _forward(self, data):
         pred0 = self.extract_view(data, "0")
         pred1 = self.extract_view(data, "1")
@@ -77,38 +105,29 @@ class TwoViewPipeline(BaseModel):
             **{k + "1": v for k, v in pred1.items()},
         }
 
-        if self.conf.matcher.name:
-            pred = {**pred, **self.matcher({**data, **pred})}
+        # Remove matcher component to avoid later confusion?
         if self.conf.filter.name:
             pred = {**pred, **self.filter({**data, **pred})}
         if self.conf.solver.name:
             pred = {**pred, **self.solver({**data, **pred})}
 
-        if self.conf.ground_truth.name and self.conf.run_gt_in_forward:
-            gt_pred = self.ground_truth({**data, **pred})
-            pred.update({f"gt_{k}": v for k, v in gt_pred.items()})
         return pred
 
     def loss(self, pred, data):
         losses = {}
         metrics = {}
-        total = 0
 
         # get labels
-        if self.conf.ground_truth.name and not self.conf.run_gt_in_forward:
-            gt_pred = self.ground_truth({**data, **pred})
-            pred.update({f"gt_{k}": v for k, v in gt_pred.items()})
-
         for k in self.components:
             apply = True
             if "apply_loss" in self.conf[k].keys():
                 apply = self.conf[k].apply_loss
             if self.conf[k].name and apply:
                 try:
-                    losses_, metrics_ = getattr(self, k).loss(pred, {**pred, **data})
+                    losses_, metrics_ = getattr(self, k).loss(pred, data)
                 except NotImplementedError:
                     continue
                 losses = {**losses, **losses_}
                 metrics = {**metrics, **metrics_}
-                total = losses_["total"] + total
-        return {**losses, "total": total}, metrics
+
+        return losses_, metrics_

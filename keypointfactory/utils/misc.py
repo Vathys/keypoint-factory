@@ -16,7 +16,7 @@ def get_twoview(data, idx):
     ri = idx[-1]
     assert idx == f"{li}to{ri}"
     data_lr = {k[:-4] + "0to1": v for k, v in data.items() if k[-4:] == f"{li}to{ri}"}
-    data_rl = {k[:-4] + "1to0": v for k, v in data.items() if k[-4:] == f"{ri}ito{li}"}
+    data_rl = {k[:-4] + "1to0": v for k, v in data.items() if k[-4:] == f"{ri}to{li}"}
     data_l = {
         k[:-1] + "0": v for k, v in data.items() if k[-1:] == li and k[-3:-1] != "to"
     }
@@ -33,7 +33,7 @@ def stack_twoviews(data, indices=["0to1", "0to2", "1to2"]):
     for idx in indices[1:]:
         data_i = data[idx] if idx in data else get_twoview(data, idx)
         for k, v in data_i.items():
-            m_data[k] = torch.cat([m_data[k], v], dim=0)
+            m_data[k] = torch.stack([m_data[k], v], dim=0)
     return m_data
 
 

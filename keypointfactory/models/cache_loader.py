@@ -50,10 +50,17 @@ def recursive_load(grp, pkeys):
         k: (
             torch.from_numpy(grp[k].__array__())
             if isinstance(grp[k], h5py.Dataset)
-            else recursive_load(grp[k], list(grp.keys()))
+            else recursive_load(grp[k], list(grp[k].keys()))
         )
         for k in pkeys
     }
+
+
+def apply_recursive(pred, key, fn):
+    if isinstance(pred[key], dict):
+        return {k: apply_recursive(pred[key], k, fn) for k, v in pred[key].items()}
+    else:
+        return fn(pred[key])
 
 
 class CacheLoader(BaseModel):
@@ -128,7 +135,7 @@ class CacheLoader(BaseModel):
                             if len(view_idx) == 0
                             else data[f"view{view_idx}"]["scales"]
                         )
-                        pred[k] = pred[k] * scales[i]
+                        pred[k] = apply_recursive(pred, k, lambda x: x * scales[i])
             # use this function to fix number of keypoints etc.
             if self.padding_fn is not None:
                 pred = self.padding_fn(pred, self.conf.padding_length)

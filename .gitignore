@@ -7,3 +7,5 @@ __pycache__
 notebooks/
 data
 outputs
+helper_scripts/
+*.ipynb_checkpoints

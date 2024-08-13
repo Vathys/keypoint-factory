@@ -93,6 +93,15 @@ class TensorWrapper:
     def detach(self):
         return self.__class__(self._data.detach())
 
+    def clone(self):
+        return self.__class__(self._data.clone())
+
+    def squeeze(self, dim=None):
+        return self.__class__(self._data.squeeze(dim))
+
+    def unsqueeze(self, dim=None):
+        return self.__class__(self._data.unsqueeze(dim))
+
     @classmethod
     def stack(cls, objects: List, dim=0, *, out=None):
         data = torch.stack([obj._data for obj in objects], dim=dim, out=out)
@@ -104,6 +113,10 @@ class TensorWrapper:
             kwargs = {}
         if func is torch.stack:
             return self.stack(*args, **kwargs)
+        elif func is torch.squeeze:
+            return self.squeeze(*args, **kwargs)
+        elif func is torch.unsqueeze:
+            return self.unsqueeze(*args, **kwargs)
         else:
             return NotImplemented
 
