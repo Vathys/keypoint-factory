@@ -26,6 +26,7 @@ class TwoViewPipeline(BaseModel):
         },
         "filter": {"name": None},
         "solver": {"name": None},
+        "ground_truth": {"name": None},
         "allow_no_extract": False,
         "run_gt_in_forward": False,
     }
@@ -33,7 +34,6 @@ class TwoViewPipeline(BaseModel):
     strict_conf = False  # need to pass new confs to children models
     components = [
         "extractor",
-        "matcher",
         "filter",
         "solver",
         "ground_truth",
@@ -42,9 +42,6 @@ class TwoViewPipeline(BaseModel):
     def _init(self, conf):
         if conf.extractor.name:
             self.extractor = get_model(conf.extractor.name)(to_ctr(conf.extractor))
-
-        if conf.matcher.name:
-            self.matcher = get_model(conf.matcher.name)(to_ctr(conf.matcher))
 
         if conf.filter.name:
             self.filter = get_model(conf.filter.name)(to_ctr(conf.filter))
