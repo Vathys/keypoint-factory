@@ -44,8 +44,6 @@ train:
   dataset_callback_fn: sample_new_items
   auc_metrics:
     desc_rel_pose_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    depth_rel_pose_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-  best_key: "desc_rel_pose_error_auc"
   lr: 1e-4
   lr_schedule:
     type: null

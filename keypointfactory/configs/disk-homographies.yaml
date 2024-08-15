@@ -1,0 +1,38 @@
+data:
+  name: homographies
+  data_dir: revisitop1m
+  train_size: 150000
+  val_size: 2000
+  batch_size: 128
+  num_workers: 14
+  homography:
+    difficulty: 0.7
+    max_angle: 45
+  photometric:
+    name: lg
+
+model:
+  name: triplet_pipeline
+  extractor:
+    name: disk
+    max_num_keypoints: null
+    force_num_keypoints: True
+    detection_threshold: 0.0
+    trainable: True
+  batch_triplets: False
+
+train:
+  seed: 42
+  epochs: 50
+  log_every_iter: 100
+  eval_every_iter: 1000
+  save_every_iter: 2500
+  log_grad_every_iter: 1000
+  lr: 1e-4
+  lr_schedule:
+    type: null
+  lr_scaling: [()]
+  mixed_precision: false
+  plot:
+    [5, "keypointfactory.visualization.visualize_batch.make_keypoint_figures"]
+  substep: 1

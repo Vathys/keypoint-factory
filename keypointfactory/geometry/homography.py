@@ -334,7 +334,7 @@ def sym_homography_error_all(kpts0, kpts1, H):
 
 
 def homography_corner_error(T, T_gt, image_size):
-    W, H = image_size[..., 0], image_size[..., 1]
+    W, H = image_size[0], image_size[1]
     corners0 = torch.Tensor([[0, 0], [W, 0], [W, H], [0, H]]).float().to(T)
     corners1_gt = from_homogeneous(to_homogeneous(corners0) @ T_gt.transpose(-1, -2))
     corners1 = from_homogeneous(to_homogeneous(corners0) @ T.transpose(-1, -2))

@@ -7,6 +7,7 @@ from ...geometry.epipolar import (
     asymm_epipolar_distance_all,
     relative_pose_error,
 )
+from ...geometry.homography import warp_points_torch, homography_corner_error
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
@@ -29,6 +30,63 @@ def point_distribution(logits):
     logp = proposal_logp + accept_logp
 
     return proposals, accept_mask, logp
+
+
+def unproject(kpts, depth, cam, pose):
+    batch, h, w = depth.shape
+    in_range = (
+        (0 <= kpts[:, :, 0])
+        & (kpts[:, :, 0] < w)
+        & (0 <= kpts[:, :, 1])
+        & (kpts[:, :, 1] < h)
+    )
+    finite = torch.isfinite(kpts).all(dim=2)
+    valid_depth = in_range & finite
+
+    valid_kpts = []
+    for b in range(batch):
+        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
+    fdepth = torch.full(
+        kpts.shape[:2],
+        fill_value=float("NaN"),
+        device=kpts.device,
+        dtype=kpts.dtype,
+    )
+
+    for b in range(batch):
+        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
+
+    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
+    kptsw = pose.inv().transform(kptsc)
+
+    return kptsw
+
+
+def project(kptsw, cam, pose):
+    ext = pose.transform(kptsw)
+    kpts, _ = cam.cam2image(ext)
+    return kpts
+
+
+def reproject_homography(kpts, H, h, w, inverse):
+    kptsw = warp_points_torch(kpts, H, inverse)
+
+    valid = (
+        (0 <= kptsw[:, :, 0])
+        & (kptsw[:, :, 0] < w)
+        & (0 <= kptsw[:, :, 1])
+        & (kptsw[:, :, 1] < h)
+    )
+
+    nkpts = torch.full(
+        kpts.shape,
+        fill_value=float("NaN"),
+        device=kpts.device,
+        dtype=kpts.dtype,
+    )
+    nkpts[valid] = kptsw[valid]
+
+    return nkpts
 
 
 class ConsistentMatchDistribution:
@@ -109,6 +167,64 @@ class ConsistentMatcher(torch.nn.Module):
 
 
 class CycleMatcher:
+    def match_by_homography(self, data, pred):
+        kpts0 = pred["keypoints0"]
+        kpts1 = pred["keypoints1"]
+
+        H_0to1 = data["H_0to1"]
+
+        kpts0_r = reproject_homography(
+            kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
+        )
+        kpts1_r = reproject_homography(
+            kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
+        )
+
+        diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
+        diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
+
+        dist0 = torch.norm(diff0, dim=-1)
+        dist1 = torch.norm(diff1, dim=-1)
+        dist = torch.max(dist0, dist1)
+        mask_visible = ~torch.isnan(dist)
+        inf = dist.new_tensor(float("inf"))
+        dist = torch.where(mask_visible, dist, inf)
+
+        min0 = dist.min(-1).indices
+        min1 = dist.min(-2).indices
+        ismin0 = torch.zeros(dist.shape, dtype=torch.bool, device=dist.device)
+        ismin1 = ismin0.clone()
+
+        ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
+        ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
+        positive = ismin0 & ismin1
+        validm0 = positive.any(-1)
+        validm1 = positive.any(-2)
+
+        unmatched0 = min0.new_tensor(-1)
+        m0 = torch.where(validm0, min0, unmatched0)
+        m1 = torch.where(validm1, min1, unmatched0)
+
+        matches = []
+        for b in range(kpts0.shape[0]):
+            cyclical0 = (
+                m1[b][m0[b][validm0[b]]]
+                == torch.arange(m0[b].shape[0], device=m0.device)[validm0[b]]
+            )
+
+            matches.append(
+                torch.stack(
+                    [
+                        torch.arange(m0.shape[1], device=m0.device)[validm0[b]][
+                            cyclical0
+                        ],
+                        m0[b][validm0[b]][cyclical0],
+                    ]
+                )
+            )
+        matches = pad_and_stack(matches, None, -1, mode="constant", constant=-1)
+        return matches.transpose(1, 2)
+
     def match_by_depth(self, data, pred):
         kpts0 = pred["keypoints0"]  # [B, N, 2]
         kpts1 = pred["keypoints1"]  # [B, M, 2]
@@ -122,17 +238,6 @@ class CycleMatcher:
 
         kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
         kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
-
-        # d0, valid0 = sample_depth(kpts0, depth0)
-        # d1, valid1 = sample_depth(kpts1, depth1)
-
-        # kpts0_1, visible0 = project(
-        #     kpts0, d0, depth1, cam0, cam1, T0_1, valid0, 1.0
-        # )  # [B, M, 2]
-        # kpts1_0, visible1 = project(
-        #     kpts1, d1, depth0, cam1, cam0, T1_0, valid1, 1.0
-        # )  # [B, N, 2]
-        # mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -256,40 +361,26 @@ class Unet(torch.nn.Module):
         return f_bot
 
 
-def unproject(kpts, depth, cam, pose):
-    batch, h, w = depth.shape
-    in_range = (
-        (0 <= kpts[:, :, 0])
-        & (kpts[:, :, 0] < w)
-        & (0 <= kpts[:, :, 1])
-        & (kpts[:, :, 1] < h)
-    )
-    finite = torch.isfinite(kpts).all(dim=2)
-    valid_depth = in_range & finite
+def classify_by_homography(data, pred, threshold=2.0):
+    kpts0 = pred["keypoints0"]
+    kpts1 = pred["keypoints1"]
 
-    valid_kpts = []
-    for b in range(batch):
-        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
-    fdepth = torch.full(
-        kpts.shape[:2],
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
+    H_0to1 = data["H_0to1"]
+
+    kpts0_r = reproject_homography(
+        kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
+    )
+    kpts1_r = reproject_homography(
+        kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
     )
 
-    for b in range(batch):
-        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
+    diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
+    diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
 
-    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
-    kptsw = pose.inv().transform(kptsc)
+    close0 = torch.norm(diff0, p=2, dim=-1) < threshold
+    close1 = torch.norm(diff1, p=2, dim=-1) < threshold
 
-    return kptsw
-
-
-def project(kptsw, cam, pose):
-    ext = pose.transform(kptsw)
-    kpts, _ = cam.cam2image(ext)
-    return kpts
+    return close0 & close1
 
 
 def classify_by_epipolar(data, pred, threshold=2.0):
@@ -333,9 +424,9 @@ def classify_by_depth(data, pred, threshold=2.0):
     return close0 & close1
 
 
-def epipolar_reward(data, pred, threshold=2.0, lm_top=1.0, lm_fp=-0.25):
+def epipolar_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
     good = classify_by_epipolar(data, pred, threshold)
-    return lm_top * good + lm_fp * (~good)
+    return lm_tp * good + lm_fp * (~good)
 
 
 def depth_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
@@ -343,6 +434,12 @@ def depth_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
     good_pairs = classify_by_depth(data, pred, threshold)
 
     return lm_tp * good_pairs + lm_fp * epi_bad
+
+
+def homography_rewrad(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
+    good_pairs = classify_by_homography(data, pred, threshold)
+
+    return lm_tp * good_pairs + lm_fp * ~good_pairs
 
 
 class DISK(BaseModel):
@@ -355,6 +452,7 @@ class DISK(BaseModel):
         "detection_threshold": 0.005,
         "desc_dim": 128,
         "weights": None,
+        "reward": "depth",
         "arch": {
             "kernel_size": 5,
             "gate": "PReLU",
@@ -374,7 +472,7 @@ class DISK(BaseModel):
             "lambda_fp": -0.25,
             "lambda_kp": -0.001,
         },
-        "pose_estimator": {"estimator": "degensac", "ransac_th": 1.0},
+        "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
     requred_data_keys = ["image"]
@@ -601,13 +699,32 @@ class DISK(BaseModel):
         # self.train_matcher.inverse_T = 15.0 + 35.0 * min(1.0, 0.05 * epoch)
 
     def loss(self, pred, data):
-        elementwise_reward = depth_reward(
-            data,
-            pred,
-            threshold=self.conf.loss.reward_threshold,
-            lm_tp=self.lm_tp,
-            lm_fp=self.lm_fp,
-        )
+        if self.conf.reward == "depth":
+            elementwise_reward = depth_reward(
+                data,
+                pred,
+                threshold=self.conf.loss.reward_threshold,
+                lm_tp=self.lm_tp,
+                lm_fp=self.lm_fp,
+            )
+        elif self.conf.reward == "epipolar":
+            elementwise_reward = epipolar_reward(
+                data,
+                pred,
+                threshold=self.conf.loss.reward_threshold,
+                lm_tp=self.lm_tp,
+                lm_fp=self.lm_fp,
+            )
+        elif self.conf.reward == "homography":
+            elementwise_reward = homography_rewrad(
+                data,
+                pred,
+                threshold=self.conf.loss.reward_threshold,
+                lm_tp=self.lm_tp,
+                lm_fp=self.lm_fp,
+            )
+        else:
+            raise ValueError(f"Unknown reward type {self.conf.reward}")
 
         match_dist = self.train_matcher.match_pair(pred)
 
@@ -638,7 +755,10 @@ class DISK(BaseModel):
             "lm_kp": torch.tensor([self.lm_kp] * loss.shape[0], dtype=torch.float64),
             "lm_tp": torch.tensor([self.lm_tp] * loss.shape[0], dtype=torch.float64),
             "lm_fp": torch.tensor([self.lm_fp] * loss.shape[0], dtype=torch.float64),
-            "n_kpts": sample_lp_flat,
+            "sample_lp": sample_lp_flat,
+            "n_kpts": torch.tensor(
+                [logp0.shape[1]] * loss.shape[0], device=logp0.device
+            ),
         }
         del (
             logp0,
@@ -672,7 +792,9 @@ class DISK(BaseModel):
                     device=pred["keypoints0"].device,
                 ).repeat(pred["keypoints0"].shape[0])
 
-                def get_match_metrics(kpts0, kpts1, T, matches):
+                def get_match_metrics(
+                    kpts0, kpts1, M_gt, matches, image_size=None, estimate="relpose"
+                ):
                     results = {}
 
                     valid_indices0 = (matches[:, :, 0] >= 0) & (
@@ -698,9 +820,14 @@ class DISK(BaseModel):
 
                     results["n_pairs"] = matches.shape[1]
 
-                    good = classify_by_epipolar(
-                        data, {"keypoints0": kpts0, "keypoints1": kpts1}
-                    )
+                    if estimate == "relpose":
+                        good = classify_by_epipolar(
+                            data, {"keypoints0": kpts0, "keypoints1": kpts1}
+                        )
+                    elif estimate == "homography":
+                        good = classify_by_homography(
+                            data, {"keypoints0": kpts0, "keypoints1": kpts1}
+                        )
                     good = good.diagonal(dim1=-2, dim2=-1)
                     bad = ~good
 
@@ -718,28 +845,53 @@ class DISK(BaseModel):
                         [results["n_pairs"]] * kpts0.shape[0], device=kpts0.device
                     )
 
-                    results["rel_pose_error"] = torch.tensor([], device=kpts0.device)
                     results["ransac_inl"] = torch.tensor([], device=kpts0.device)
                     results["ransac_inl%"] = torch.tensor([], device=kpts0.device)
                     for b in range(kpts0.shape[0]):
-                        estimator = load_estimator(
-                            "relative_pose", self.conf.pose_estimator["estimator"]
-                        )({"ransac_th": self.conf.pose_estimator["ransac_th"]})
-                        data_ = {
-                            "m_kpts0": kpts0[b].unsqueeze(0),
-                            "m_kpts1": kpts1[b].unsqueeze(0),
-                            "camera0": data["view0"]["camera"][b],
-                            "camera1": data["view1"]["camera"][b],
-                        }
-                        est = estimator(data_)
+                        if estimate == "relpose":
+                            results["rel_pose_error"] = torch.tensor(
+                                [], device=kpts0.device
+                            )
+                            estimator = load_estimator(
+                                "relative_pose", self.conf.estimator["name"]
+                            )(self.conf.estimator)
+                            data_ = {
+                                "m_kpts0": kpts0[b].unsqueeze(0),
+                                "m_kpts1": kpts1[b].unsqueeze(0),
+                                "camera0": data["view0"]["camera"][b],
+                                "camera1": data["view1"]["camera"][b],
+                            }
+                            est = estimator(data_)
+                        elif estimate == "homography":
+                            results["error"] = torch.tensor([], device=kpts0.device)
+                            estimator = load_estimator(
+                                "homography", self.conf.estimator["name"]
+                            )(self.conf.estimator)
+                            data_ = {
+                                "m_kpts0": kpts0[b].unsqueeze(0),
+                                "m_kpts1": kpts1[b].unsqueeze(0),
+                            }
+                            est = estimator(data_)
 
                         if not est["success"]:
-                            results["rel_pose_error"] = torch.cat(
-                                [
-                                    results["rel_pose_error"],
-                                    torch.tensor([float("inf")], device=kpts0.device),
-                                ]
-                            )
+                            if estimate == "relpose":
+                                results["rel_pose_error"] = torch.cat(
+                                    [
+                                        results["rel_pose_error"],
+                                        torch.tensor(
+                                            [float("inf")], device=kpts0.device
+                                        ),
+                                    ]
+                                )
+                            elif estimate == "homography":
+                                results["error"] = torch.cat(
+                                    [
+                                        results["error"],
+                                        torch.tensor(
+                                            [float("inf")], device=kpts0.device
+                                        ),
+                                    ]
+                                )
                             results["ransac_inl"] = torch.cat(
                                 [
                                     results["ransac_inl"],
@@ -753,17 +905,29 @@ class DISK(BaseModel):
                                 ]
                             )
                         else:
-                            # R, t, inl = ret
                             M = est["M_0to1"]
                             inl = est["inliers"]
-                            t_error, r_error = relative_pose_error(T[b], M.R, M.t)
+                            if estimate == "relpose":
+                                t_error, r_error = relative_pose_error(
+                                    M_gt[b], M.R, M.t
+                                )
 
-                            results["rel_pose_error"] = torch.cat(
-                                [
-                                    results["rel_pose_error"],
-                                    max(r_error, t_error).unsqueeze(0),
-                                ]
-                            )
+                                results["rel_pose_error"] = torch.cat(
+                                    [
+                                        results["rel_pose_error"],
+                                        max(r_error, t_error).unsqueeze(0),
+                                    ]
+                                )
+                            elif estimate == "homography":
+                                results["error"] = torch.cat(
+                                    [
+                                        results["error"],
+                                        homography_corner_error(
+                                            M, M_gt, image_size
+                                        ).unsqueeze(0),
+                                    ]
+                                )
+
                             results["ransac_inl"] = torch.cat(
                                 [results["ransac_inl"], torch.sum(inl).unsqueeze(0)]
                             )
@@ -777,23 +941,60 @@ class DISK(BaseModel):
                     "n_kpts": n_kpts,
                 }
 
-                desc_matches = self.val_matcher.match_by_descriptors(pred)
-                depth_matches = self.val_matcher.match_by_depth(data, pred)
-                kpts0 = pred["keypoints0"]
-                kpts1 = pred["keypoints1"]
+                if "depth" in data["view0"]:
+                    desc_matches = self.val_matcher.match_by_descriptors(pred)
+                    depth_matches = self.val_matcher.match_by_depth(data, pred)
+                    kpts0 = pred["keypoints0"]
+                    kpts1 = pred["keypoints1"]
 
-                desc_metrics = get_match_metrics(
-                    kpts0, kpts1, data["T_0to1"], desc_matches
-                )
-                depth_metrics = get_match_metrics(
-                    kpts0, kpts1, data["T_0to1"], depth_matches
-                )
+                    desc_metrics = get_match_metrics(
+                        kpts0,
+                        kpts1,
+                        data["T_0to1"],
+                        desc_matches,
+                        estimate="relpose",
+                    )
+                    depth_metrics = get_match_metrics(
+                        kpts0,
+                        kpts1,
+                        data["T_0to1"],
+                        depth_matches,
+                        estimate="relpose",
+                    )
 
-                metrics = {
-                    **metrics,
-                    **{"desc_" + k: v for k, v in desc_metrics.items()},
-                    **{"depth_" + k: v for k, v in depth_metrics.items()},
-                }
+                    metrics = {
+                        **metrics,
+                        **{"desc_" + k: v for k, v in desc_metrics.items()},
+                        **{"depth_" + k: v for k, v in depth_metrics.items()},
+                    }
+                else:
+                    desc_matches = self.val_matcher.match_by_descriptors(pred)
+                    matches = self.val_matcher.match_by_homography(data, pred)
+                    kpts0 = pred["keypoints0"]
+                    kpts1 = pred["keypoints1"]
+
+                    desc_metrics = get_match_metrics(
+                        kpts0,
+                        kpts1,
+                        data["H_0to1"],
+                        desc_matches,
+                        data["view0"]["image"].shape[-2:],
+                        estimate="homography",
+                    )
+                    homography_metrics = get_match_metrics(
+                        kpts0,
+                        kpts1,
+                        data["H_0to1"],
+                        matches,
+                        data["view0"]["image"].shape[-2:],
+                        estimate="homography",
+                    )
+
+                    metrics = {
+                        **metrics,
+                        **{"desc_" + k: v for k, v in desc_metrics.items()},
+                        **{"homography_" + k: v for k, v in homography_metrics.items()},
+                    }
         else:
             metrics = {}
 
