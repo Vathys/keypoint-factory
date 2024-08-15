@@ -123,7 +123,8 @@ def plot_image_grid(
     for j in range(nr):
         for i in range(n):
             ax = axs[j][i]
-            ax.imshow(imgs[j][i], cmap=plt.get_cmap(cmaps[i]))
+            img = ax.imshow(imgs[j][i], cmap=plt.get_cmap(cmaps[i]), picker=True)
+            img.axes_image_index = (j, i)
             ax.set_axis_off()
             if set_lim:
                 ax.set_xlim([0, imgs[j][i].shape[1]])
@@ -138,7 +139,7 @@ def plot_image_grid(
         return axs
 
 
-def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0):
+def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0, pickable=True):
     """Plot keypoints for existing images.
     Args:
         kpts: list of ndarrays of size (N, 2).
@@ -152,7 +153,16 @@ def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0):
     if axes is None:
         axes = plt.gcf().axes
     for ax, k, c, alpha in zip(axes, kpts, colors, a):
-        ax.scatter(k[:, 0], k[:, 1], c=c, s=ps, linewidths=0, alpha=alpha)
+        ax.scatter(
+            k[:, 0],
+            k[:, 1],
+            c=c,
+            s=ps,
+            linewidths=0,
+            alpha=alpha,
+            picker=pickable,
+            pickradius=5,
+        )
 
 
 def plot_matches(kpts0, kpts1, color=None, lw=1.5, ps=4, a=1.0, labels=None, axes=None):
@@ -162,8 +172,9 @@ def plot_matches(kpts0, kpts1, color=None, lw=1.5, ps=4, a=1.0, labels=None, axe
         color: color of each match, string or RGB tuple. Random if not given.
         lw: width of the lines.
         ps: size of the end points (no endpoint if ps=0)
-        indices: indices of the images to draw the matches on.
         a: alpha opacity of the match lines.
+        labels: list of two strings for the legend.
+        axes: list or tuple of two axes to draw the matches on.
     """
     fig = plt.gcf()
     if axes is None:
@@ -257,7 +268,14 @@ def add_text(
 
 
 def draw_epipolar_line(
-    line, axis, imshape=None, color="b", label=None, alpha=1.0, visible=True
+    line,
+    axis,
+    imshape=None,
+    color="b",
+    label=None,
+    alpha=1.0,
+    visible=True,
+    pickable=True,
 ):
     if imshape is not None:
         h, w = imshape[:2]
@@ -265,6 +283,7 @@ def draw_epipolar_line(
         _, w = axis.get_xlim()
         h, _ = axis.get_ylim()
         imshape = (h + 0.5, w + 0.5)
+
     # Intersect line with lines representing image borders.
     X1 = np.cross(line, [1, 0, -1])
     X1 = X1[:2] / X1[2]
@@ -296,6 +315,7 @@ def draw_epipolar_line(
             label=label,
             alpha=alpha,
             visible=visible,
+            picker=pickable,
         )[0]
         return art
     else:

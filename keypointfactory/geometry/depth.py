@@ -86,3 +86,39 @@ def dense_warp_consistency(
     return kpir.unflatten(-2, depthi.shape[-2:]), validir.unflatten(
         -1, (depthj.shape[-2:])
     )
+
+
+def unproject(kpts, depth, cam, pose):
+    batch, h, w = depth.shape
+    in_range = (
+        (0 <= kpts[:, :, 0])
+        & (kpts[:, :, 0] < w)
+        & (0 <= kpts[:, :, 1])
+        & (kpts[:, :, 1] < h)
+    )
+    finite = torch.isfinite(kpts).all(dim=2)
+    valid_depth = in_range & finite
+
+    valid_kpts = []
+    for b in range(batch):
+        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
+    fdepth = torch.full(
+        kpts.shape[:2],
+        fill_value=float("NaN"),
+        device=kpts.device,
+        dtype=kpts.dtype,
+    )
+
+    for b in range(batch):
+        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
+
+    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
+    kptsw = pose.inv().transform(kptsc)
+
+    return kptsw
+
+
+def simple_project(kptsw, cam, pose):
+    ext = pose.transform(kptsw)
+    kpts, _ = cam.cam2image(ext)
+    return kpts

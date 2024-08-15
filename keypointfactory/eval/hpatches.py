@@ -1,9 +1,11 @@
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
+from typing import Iterable
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -13,9 +15,80 @@ from ..models.cache_loader import CacheLoader
 from ..settings import EVAL_PATH
 from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
+from ..utils.tools import AUCMetric
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
-from .utils import eval_pair_homography
+from .utils import eval_homography_robust, eval_pair_homography
+
+COL_TO_LABELS = {
+    "num_covisible_correct": ("Number of correct covisible points", "NCC Ratio"),
+    "localization_score": ("Sum of localization scores", "Localization Score"),
+    "repeatability": ("Repeatability", "Repeatability"),
+    "H_error_auc": ("Homography Error AUC", "Homography Error (AUC)"),
+}
+
+
+def plot_scene_summary(summaries, column):
+    fig, axes = plt.subplots(2, 1, figsize=(16, 14), sharey=True)
+
+    illum = summaries[summaries["scene"].map(lambda x: x.startswith("i"))]
+    view = summaries[summaries["scene"].map(lambda x: x.startswith("v"))]
+
+    sns.lineplot(
+        data=illum,
+        x="scene",
+        y=column,
+        markers=True,
+        dashes=False,
+        ax=axes[0],
+        label="per scene (viewpoint)",
+    )
+    sns.lineplot(
+        data=view,
+        x="scene",
+        y=column,
+        markers=True,
+        dashes=False,
+        ax=axes[1],
+        label="per scene (illumination)",
+    )
+
+    axes[0].axhline(
+        y=illum.mean(axis=0, numeric_only=True)[column], label="illumination mean"
+    )
+    axes[0].axhline(
+        y=summaries.mean(axis=0, numeric_only=True)[column],
+        color="black",
+        label="global mean",
+    )
+    axes[1].axhline(
+        y=view.mean(axis=0, numeric_only=True)[column], label="viewpoint mean"
+    )
+    axes[1].axhline(
+        y=summaries.mean(axis=0, numeric_only=True)[column],
+        color="black",
+        label="global mean",
+    )
+
+    axes[0].legend()
+    axes[1].legend()
+
+    axes[0].set_title(f"{COL_TO_LABELS[column][0]} per scene (illumination)")
+    axes[0].set_xlabel("Scenes")
+    axes[0].set_ylabel(COL_TO_LABELS[column][1])
+
+    axes[1].set_title(f"{COL_TO_LABELS[column][0]} per scene (viewpoint)")
+    axes[1].set_xlabel("Scenes")
+    axes[1].set_ylabel(COL_TO_LABELS[column][1])
+
+    for ax in axes:
+        for label in ax.get_xticklabels():
+            label.set_rotation(60)
+            label.set_ha("right")
+
+    fig.tight_layout()
+
+    return fig
 
 
 def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):
@@ -84,6 +157,8 @@ class HPatchesPipeline(EvalPipeline):
             "padding": 4.0,
             "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
+            "use_gt": False,
+            "summarize_by_scene": True,
         },
     }
     export_keys = [
@@ -91,8 +166,8 @@ class HPatchesPipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
-        "descriptors0",
-        "descriptors1",
+        "heatmap0",
+        "heatmap1",
     ]
 
     def _init(self, conf):
@@ -104,11 +179,15 @@ class HPatchesPipeline(EvalPipeline):
         dataset = get_dataset("hpatches")(data_conf)
         return dataset.get_data_loader("test")
 
-    def get_predictions(self, experiment_dir, model=None, overwrite=False):
+    def get_predictions(
+        self, experiment_dir, model=None, overwrite=False, get_last=False
+    ):
         pred_file = experiment_dir / "predictions.h5"
         if not pred_file.exists() or overwrite:
             if model is None:
-                model = load_model(self.conf.model, self.conf.checkpoint)
+                model = load_model(
+                    self.conf.model, self.conf.checkpoint, get_last=get_last
+                )
             export_predictions(
                 self.get_dataloader(self.conf.data),
                 model,
@@ -124,10 +203,16 @@ class HPatchesPipeline(EvalPipeline):
 
         conf = self.conf.eval
 
-        if isinstance(conf.top_k_thresholds, int):
+        if isinstance(conf.top_k_thresholds, int) or conf.top_k_thresholds is None:
             conf.top_k_thresholds = [conf.top_k_thresholds]
-        if isinstance(conf.top_k_by, str):
+        if isinstance(conf.top_k_by, str) or conf.top_k_by is None:
             conf.top_k_by = [conf.top_k_by]
+
+        test_thresholds = (
+            ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+            if not isinstance(conf.ransac_th, Iterable)
+            else conf.ransac_th
+        )
 
         df_list = []
         cache_loader = CacheLoader({"path": str(pred_file), "collate": None}).eval()
@@ -141,7 +226,7 @@ class HPatchesPipeline(EvalPipeline):
                         data,
                         pred,
                         eval_to_0=False,
-                        top_k=int(top_k),
+                        top_k=int(top_k) if top_k is not None else top_k,
                         top_by=top_by,
                         thresh=conf.correctness_threshold,
                         padding=conf.padding,
@@ -149,10 +234,21 @@ class HPatchesPipeline(EvalPipeline):
                     # This is a quick fix. Don't do this.
                     # Handle edge case when calculating repeatability
                     pair_metrics["top_k"] = top_k
-                    pair_metrics["top_by"] = top_by
-                    pair_metrics["scene"] = scene_name
+                    pair_metrics["top_by"] = str(top_by)
+                    pair_metrics["scene"] = str(scene_name)
                     pair_metrics["name"] = data["name"][0]
-                    df_list.append(pair_metrics)
+                    if self.conf.eval.estimator:
+                        for th in test_thresholds:
+                            pose_metrics = eval_homography_robust(
+                                data, pred, {**self.conf.eval, "ransac_th": th}
+                            )
+
+                            pair_metrics = pair_metrics.join(pose_metrics, how="left")
+                            pair_metrics["ransac_th"] = th
+
+                            df_list.append(pair_metrics)
+                    else:
+                        df_list.append(pair_metrics)
 
         results = pd.concat(df_list)
 
@@ -163,8 +259,8 @@ class HPatchesPipeline(EvalPipeline):
                     x
                     if x is not None
                     else (
-                        self.conf.model.max_num_keypoints
-                        if self.conf.model.max_num_keypoints is not None
+                        self.conf.model.extractor.max_num_keypoints
+                        if self.conf.model.extractor.max_num_keypoints is not None
                         else float("inf")
                     )
                 )
@@ -172,23 +268,55 @@ class HPatchesPipeline(EvalPipeline):
         )  # Multiple top_k by 2 because we take
         # sum of correct points from two images
 
+        def calc_auc(df):
+            auc = AUCMetric(list(range(1, 11)), df)
+            return auc.compute()
+
+        groupby_columns = ["top_k", "top_by", "scene"]
+
+        agg_funcs = {
+            "num_keypoints": ("num_keypoints", "sum"),
+            "num_covisible": ("num_covisible", "sum"),
+            "num_covisible_correct": ("num_covisible_correct", "sum"),
+            "localization_score": ("localization_score", "sum"),
+            "repeatability": ("repeatability", "mean"),
+        }
+
+        if self.conf.eval.estimator:
+            agg_funcs["H_error_auc"] = ("H_error_ransac", calc_auc)
+            groupby_columns.append("ransac_th")
+
+        # Perform the aggregation
         summaries = (
-            results.groupby(["scene", "top_k", "top_by"])
+            results.groupby(groupby_columns)
             .agg(
-                num_keypoints=pd.NamedAgg(column="num_keypoints", aggfunc="sum"),
-                num_covisible=pd.NamedAgg(column="num_covisible", aggfunc="sum"),
-                num_covisible_correct=pd.NamedAgg(
-                    column="num_covisible_correct", aggfunc="sum"
-                ),
-                localization_score=pd.NamedAgg(
-                    column="localization_score", aggfunc="sum"
-                ),
-                repeatability=pd.NamedAgg(column="repeatability", aggfunc="mean"),
+                **{
+                    key: pd.NamedAgg(column=value[0], aggfunc=value[1])
+                    for key, value in agg_funcs.items()
+                }
             )
             .reset_index()
         )
 
-        return summaries, {}, results
+        figures = {}
+        if "num_covisible_correct" in summaries.columns:
+            figures["ncc_ratio"] = plot_scene_summary(
+                summaries, "num_covisible_correct"
+            )
+
+        if "localization_score" in summaries.columns:
+            figures["loc_scores"] = plot_scene_summary(summaries, "localization_score")
+
+        if "repeatability" in summaries.columns:
+            figures["repeatability"] = plot_scene_summary(summaries, "repeatability")
+
+        if "H_error_auc" in summaries.columns:
+            figures["H_error_auc"] = plot_scene_summary(summaries, "H_error_auc")
+
+        if not self.conf.eval.summarize_by_scene:
+            summaries = summaries.mean(axis=0, numeric_only=True).reset_index()
+
+        return summaries, figures, results
 
 
 if __name__ == "__main__":
@@ -214,7 +342,10 @@ if __name__ == "__main__":
 
     pipeline = HPatchesPipeline(conf)
     s, f, r = pipeline.run(
-        experiment_dir, overwrite=args.overwrite, overwrite_eval=args.overwrite_eval
+        experiment_dir,
+        overwrite=args.overwrite,
+        overwrite_eval=args.overwrite_eval,
+        get_last=args.get_last,
     )
 
     # print results

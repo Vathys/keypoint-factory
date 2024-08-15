@@ -3,6 +3,7 @@ import string
 import h5py
 import torch
 
+from .. import logger
 from ..datasets.base_dataset import collate
 from ..settings import DATA_PATH
 from ..utils.tensor import batch_to_device
@@ -63,6 +64,22 @@ def apply_recursive(pred, key, fn):
         return fn(pred[key])
 
 
+def log_blocking_process(fpath):
+    import psutil
+
+    logger.debug(f"Checking for processes holding a lock on {fpath}")
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            for item in proc.open_files():
+                if item.path == str(fpath):
+                    logger.debug(
+                        f"""Process {proc.info['name']} (PID: {proc.info['pid']})
+                         is holding a lock on {fpath}"""
+                    )
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
 class CacheLoader(BaseModel):
     default_conf = {
         "path": "???",  # can be a format string like exports/{scene}/
@@ -109,38 +126,49 @@ class CacheLoader(BaseModel):
             fpath = self.conf.path.format(**{k: data[k][i] for k in var_names})
             if self.conf.add_data_path:
                 fpath = DATA_PATH / fpath
-            hfile = h5py.File(str(fpath), "r")
-            grp = hfile[name]
-            pkeys = (
-                self.conf.data_keys if self.conf.data_keys is not None else grp.keys()
-            )
-            pred = recursive_load(grp, pkeys)
-            if self.numeric_dtype is not None:
-                pred = {
-                    k: (
-                        v
-                        if not isinstance(v, torch.Tensor)
-                        or not torch.is_floating_point(v)
-                        else v.to(dtype=self.numeric_dtype)
+            try:
+                with h5py.File(str(fpath), "r") as hfile:
+                    grp = hfile[name]
+                    pkeys = (
+                        self.conf.data_keys
+                        if self.conf.data_keys is not None
+                        else grp.keys()
                     )
-                    for k, v in pred.items()
-                }
-            pred = batch_to_device(pred, device)
-            for k, v in pred.items():
-                for pattern in self.conf.scale:
-                    if k.startswith(pattern):
-                        view_idx = k.replace(pattern, "")
-                        scales = (
-                            data["scales"]
-                            if len(view_idx) == 0
-                            else data[f"view{view_idx}"]["scales"]
-                        )
-                        pred[k] = apply_recursive(pred, k, lambda x: x * scales[i])
-            # use this function to fix number of keypoints etc.
-            if self.padding_fn is not None:
-                pred = self.padding_fn(pred, self.conf.padding_length)
-            preds.append(pred)
-            hfile.close()
+                    pred = recursive_load(grp, pkeys)
+                    if self.numeric_dtype is not None:
+                        pred = {
+                            k: (
+                                v
+                                if not isinstance(v, torch.Tensor)
+                                or not torch.is_floating_point(v)
+                                else v.to(dtype=self.numeric_dtype)
+                            )
+                            for k, v in pred.items()
+                        }
+                    pred = batch_to_device(pred, device)
+                    for k, v in pred.items():
+                        for pattern in self.conf.scale:
+                            if k.startswith(pattern):
+                                view_idx = k.replace(pattern, "")
+                                scales = (
+                                    data["scales"]
+                                    if len(view_idx) == 0
+                                    else data[f"view{view_idx}"]["scales"]
+                                )
+                                pred[k] = apply_recursive(
+                                    pred, k, lambda x: x * scales[i]
+                                )
+                    # use this function to fix number of keypoints etc.
+                    if self.padding_fn is not None:
+                        pred = self.padding_fn(pred, self.conf.padding_length)
+                    preds.append(pred)
+            except BlockingIOError as e:
+                logger.error(
+                    f"BlcokingIOError encountered while accessing file {fpath}"
+                )
+                log_blocking_process(fpath)
+                raise e
+
         if self.conf.collate:
             return batch_to_device(collate(preds), device)
         else:

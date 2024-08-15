@@ -5,11 +5,11 @@ data:
     resize: 768
     side: long
     interpolation: bilinear
-    antialias: False
-    align_corners: False
+    antialias: false
+    align_corners: false
     square_pad: true
   train_split: disk_train_scenes.txt
-  train_num_per_scene: 63
+  train_num_per_scene: 62
   val_split: disk_valid_scenes.txt
   val_num_per_scene: 250
   read_depth: true
@@ -21,46 +21,51 @@ data:
   triplet_enforce_overlap: false
   seed: 42
   load_features:
-    do: False
+    do: false
 
 model:
   name: triplet_pipeline
   extractor:
     name: disk
     max_num_keypoints: null
-    force_num_keypoints: True
+    force_num_keypoints: true
     detection_threshold: 0.0
-    trainable: True
-  batch_triplets: False
+    trainable: true
+    reward: depth
+  batch_triplets: false
+  enumerate_pairs: true
 
 train:
   seed: 42
   epochs: 50
   log_every_iter: 100
-  eval_every_iter: 1000
+  eval_every_iter: 2500
   save_every_iter: 2500
-  log_grad_every_iter: 1000
+  log_grad_every_iter: 2500
+  test_every_epoch: 5
   keep_last_checkpoints: 30
   dataset_callback_fn: sample_new_items
   auc_metrics:
     desc_rel_pose_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    depth_rel_pose_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-  best_key: "desc_rel_pose_error_auc"
   lr: 1e-4
   lr_schedule:
     type: null
   lr_scaling: [()]
-  mixed_precision: False
+  mixed_precision: false
   plot: [5, 'keypointfactory.visualization.visualize_batch.make_keypoint_figures']
   substep: 1
 
 benchmarks:
   megadepth1500:
+    model:
+      extractor:
+        max_num_keypoints: 2048
     data:
       num_workers: 10
     eval:
-      top_k_thresholds: 500
+      top_k_thresholds: 1024
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
-      use_depth: False
+      use_depth: false
+      summarize_by_scene: false

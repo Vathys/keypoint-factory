@@ -1,7 +1,7 @@
 model:
     name: two_view_pipeline
     extractor:
-        name: extractors.disk
+        name: extractors.diskv2
         max_num_keypoints: null
         detection_threshold: 0.0
         nms_radius: 2
@@ -14,13 +14,13 @@ benchmarks:
             top_k_by: scores
             estimator: degensac
             ransac_th: 1.0
-            use_gt: true
-            summarize_by_scene: true
+            use_gt: True
+            summarize_by_scene: True
     megadepth1500:
         eval:
             top_k_thresholds: 2048
             top_k_by: scores
             estimator: degensac
             ransac_th: 1.0
-            use_gt: false
-            summarize_by_scene: true
+            use_gt: True
+            summarize_by_scene: True

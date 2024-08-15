@@ -208,10 +208,13 @@ class GlobalFrame:
             preds[name] = CacheLoader({"path": str(pfile), "add_data_path": False})(
                 data
             )
-        summaries_i = {
-            name: {k: v[ind] for k, v in res.items() if k != "names"}
-            for name, res in self.results.items()
-        }
+
+        summaries_i = {name: res.iloc[ind] for name, res in self.results.items()}
+
+        # summaries_i = {
+        #     name: {k: v[ind] for k, v in res.items() if k != "names"}
+        #     for name, res in self.results.items()
+        # }
         frame = self.child_frame(
             self.conf.child,
             deepcopy(data),

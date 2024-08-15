@@ -6,7 +6,6 @@ from pprint import pprint
 from typing import Iterable
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import torch
 from omegaconf import OmegaConf
@@ -17,6 +16,7 @@ from ..models.cache_loader import CacheLoader
 from ..settings import DATA_PATH, EVAL_PATH
 from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
+from ..utils.tools import AUCMetric
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_pair_depth, eval_relative_pose_robust
@@ -45,6 +45,7 @@ class MegaDepth1500Pipeline(EvalPipeline):
             "padding": 4.0,
             "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
+            "use_gt": False,
         },
     }
 
@@ -76,12 +77,14 @@ class MegaDepth1500Pipeline(EvalPipeline):
         dataset = get_dataset(data_conf["name"])(data_conf)
         return dataset.get_data_loader("test")
 
-    def get_predictions(self, experiment_dir, model=None, overwrite=False):
+    def get_predictions(
+        self, experiment_dir, model=None, overwrite=False, get_last=False
+    ):
         """Export a prediction file for each eval datapoint"""
         pred_file = experiment_dir / "predictions.h5"
         if not pred_file.exists() or overwrite:
             if model is None:
-                model = load_model(self.conf.model, self.conf.checkpoint)
+                model = load_model(self.conf.model, self.conf.checkpoint, get_last)
             export_predictions(
                 self.get_dataloader(self.conf.data),
                 model,
@@ -102,7 +105,6 @@ class MegaDepth1500Pipeline(EvalPipeline):
         if isinstance(conf.top_k_by, str) or conf.top_k_by is None:
             conf.top_k_by = [conf.top_k_by]
 
-        results = defaultdict(list)
         test_thresholds = (
             ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
             if not isinstance(conf.ransac_th, Iterable)
@@ -163,17 +165,12 @@ class MegaDepth1500Pipeline(EvalPipeline):
         # sum of correct points from two images
 
         def calc_auc(df):
-            hist, _ = np.histogram(
-                np.nan_to_num(
-                    df.to_numpy(np.float32), nan=0, posinf=179.95, neginf=179.95
-                ),
-                bins=10,
-            )
-            hist = hist / df.shape[0]
-            auc = hist.cumsum().mean()
-            return auc
+            auc = AUCMetric(list(range(1, 11)), df)
+            return auc.compute()
 
         groupby_columns = ["top_k", "top_by"]
+        if self.conf.eval.summarize_by_scene:
+            groupby_columns.append("scene")
         agg_funcs = {
             "num_keypoints": ("num_keypoints", "sum"),
             "num_covisible": ("num_covisible", "sum"),
@@ -194,23 +191,6 @@ class MegaDepth1500Pipeline(EvalPipeline):
                     key: pd.NamedAgg(column=value[0], aggfunc=value[1])
                     for key, value in agg_funcs.items()
                 }
-            )
-            .reset_index()
-        )
-
-        summaries = (
-            results.groupby(["scene", "top_k", "top_by", "ransac_th"])
-            .agg(
-                num_keypoints=pd.NamedAgg(column="num_keypoints", aggfunc="sum"),
-                num_covisible=pd.NamedAgg(column="num_covisible", aggfunc="sum"),
-                num_covisible_correct=pd.NamedAgg(
-                    column="num_covisible_correct", aggfunc="sum"
-                ),
-                localization_score=pd.NamedAgg(
-                    column="localization_score", aggfunc="sum"
-                ),
-                repeatability=pd.NamedAgg(column="repeatability", aggfunc="mean"),
-                rel_pose_auc=pd.NamedAgg(column="rel_pose_error", aggfunc=calc_auc),
             )
             .reset_index()
         )

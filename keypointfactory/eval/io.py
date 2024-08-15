@@ -84,9 +84,9 @@ def parse_eval_args(benchmark, args, configs_path, default=None):
     return name, conf
 
 
-def load_model(model_conf, checkpoint):
+def load_model(model_conf, checkpoint, get_last):
     if checkpoint:
-        model = load_experiment(checkpoint, conf=model_conf).eval()
+        model = load_experiment(checkpoint, conf=model_conf, get_last=get_last).eval()
     else:
         model = get_model("two_view_pipeline")(model_conf).eval()
     if not model.is_initialized():
@@ -101,6 +101,7 @@ def get_eval_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--get_last", action="store_true")
     parser.add_argument("--conf", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--overwrite_eval", action="store_true")
