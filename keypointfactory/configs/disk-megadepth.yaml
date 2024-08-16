@@ -9,7 +9,7 @@ data:
     align_corners: False
     square_pad: true
   train_split: disk_train_scenes.txt
-  train_num_per_scene: 63
+  train_num_per_scene: 62
   val_split: disk_valid_scenes.txt
   val_num_per_scene: 250
   read_depth: true
@@ -37,9 +37,9 @@ train:
   seed: 42
   epochs: 50
   log_every_iter: 100
-  eval_every_iter: 1000
+  eval_every_iter: 2500
   save_every_iter: 2500
-  log_grad_every_iter: 1000
+  log_grad_every_iter: 2500
   keep_last_checkpoints: 30
   dataset_callback_fn: sample_new_items
   auc_metrics:
@@ -57,8 +57,9 @@ benchmarks:
     data:
       num_workers: 10
     eval:
-      top_k_thresholds: 500
+      top_k_thresholds: 1024
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
       use_depth: False
+      summarize_by_scene: False

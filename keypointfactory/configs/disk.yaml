@@ -12,10 +12,13 @@ benchmarks:
         eval:
             top_k_thresholds: 2048
             top_k_by: scores
+            estimator: degensac
+            ransac_th: 1.0
+            use_gt: False
     megadepth1500:
         eval:
             top_k_thresholds: 2048
             top_k_by: scores
             estimator: degensac
             ransac_th: 1.0
-            use_depth: False
+            use_gt: False

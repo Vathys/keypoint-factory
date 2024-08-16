@@ -1,6 +1,6 @@
 import torch
 
-from ..models.utils.metrics import compute_correct_depth
+from ..models.utils.metrics import compute_correctness
 from ..utils.tensor import batch_to_device
 from .viz2d import cm_RdGn, plot_heatmaps, plot_image_grid, plot_keypoints, plot_matches
 
@@ -23,8 +23,10 @@ def make_correct_figures(pred_, data_, n_pairs=2):
             [view0["image"][i].permute(1, 2, 0), view1["image"][i].permute(1, 2, 0)]
         )
         kpts.append([kp0[i], kp1[i]])
-        assert "depth" in view0
-        correct0, correct1 = compute_correct_depth(data, pred)
+        metrics = compute_correctness(data, pred)
+        correct0 = metrics["correct0"]
+        correct1 = metrics["correct1"]
+
         colors.append([cm_RdGn(correct0[i]), cm_RdGn(correct1[i])])
 
     fig, axes = plot_image_grid(images, return_fig=True, set_lim=True)

@@ -45,6 +45,7 @@ class MegaDepth1500Pipeline(EvalPipeline):
             "padding": 4.0,
             "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
+            "use_gt": False
         },
     }
 
@@ -102,7 +103,6 @@ class MegaDepth1500Pipeline(EvalPipeline):
         if isinstance(conf.top_k_by, str) or conf.top_k_by is None:
             conf.top_k_by = [conf.top_k_by]
 
-        results = defaultdict(list)
         test_thresholds = (
             ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
             if not isinstance(conf.ransac_th, Iterable)
@@ -174,6 +174,8 @@ class MegaDepth1500Pipeline(EvalPipeline):
             return auc
 
         groupby_columns = ["top_k", "top_by"]
+        if self.conf.eval.summarize_by_scene:
+            groupby_columns.append("scene")
         agg_funcs = {
             "num_keypoints": ("num_keypoints", "sum"),
             "num_covisible": ("num_covisible", "sum"),
@@ -194,23 +196,6 @@ class MegaDepth1500Pipeline(EvalPipeline):
                     key: pd.NamedAgg(column=value[0], aggfunc=value[1])
                     for key, value in agg_funcs.items()
                 }
-            )
-            .reset_index()
-        )
-
-        summaries = (
-            results.groupby(["scene", "top_k", "top_by", "ransac_th"])
-            .agg(
-                num_keypoints=pd.NamedAgg(column="num_keypoints", aggfunc="sum"),
-                num_covisible=pd.NamedAgg(column="num_covisible", aggfunc="sum"),
-                num_covisible_correct=pd.NamedAgg(
-                    column="num_covisible_correct", aggfunc="sum"
-                ),
-                localization_score=pd.NamedAgg(
-                    column="localization_score", aggfunc="sum"
-                ),
-                repeatability=pd.NamedAgg(column="repeatability", aggfunc="mean"),
-                rel_pose_auc=pd.NamedAgg(column="rel_pose_error", aggfunc=calc_auc),
             )
             .reset_index()
         )

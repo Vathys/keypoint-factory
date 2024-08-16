@@ -79,8 +79,8 @@ default_train_conf = {
 }
 default_train_conf = OmegaConf.create(default_train_conf)
 
-torch.multiprocessing.set_sharing_strategy("file_system")
-
+# torch.multiprocessing.set_sharing_strategy("file_system")
+# torch.multiprocessing.set_start_method("spawn", force=True)
 
 @torch.no_grad()
 def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
@@ -392,9 +392,13 @@ def training(rank, conf, output_dir, args):
                     EVAL_PATH / bname / args.experiment / str(epoch),
                     model.eval(),
                 )
+                s = s.to_dict("list")
                 logger.info(str(s))
                 for metric_name, value in s.items():
-                    writer.add_scalar(f"test/{bname}/{metric_name}", value, epoch)
+                    if isinstance(value[0], (int, float)):
+                        writer.add_scalar(
+                            f"test/{bname}/{metric_name}", value[0], epoch
+                        )
                 for fig_name, fig in f.items():
                     writer.add_figure(f"figures/{bname}/{fig_name}", fig, epoch)
 
@@ -444,12 +448,10 @@ def training(rank, conf, output_dir, args):
                 data = batch_to_device(data, device, non_blocking=True)
                 model._pre_loss_callback(conf.train.seed, epoch)
                 pred = model(data)
-                # in the original disk, only the descriptors and keypoint scores are
-                # detached. I'm not sure why this is?
                 detached_pred = map_tensor_filtered(
                     pred,
                     lambda x: x.detach().requires_grad_(),
-                    model._detach_grad_filter,
+                    lambda x: model._detach_grad_filter(x),
                 )
                 losses, _ = loss_fn(detached_pred, data)
                 loss = torch.sum(losses["total"])
@@ -471,13 +473,14 @@ def training(rank, conf, output_dir, args):
                 for sloss in losses["total"]:
                     scaler.scale(sloss).backward(retain_graph=True)
 
-                leaves = gather_tensor(pred, model._detach_grad_filter)
-                grads = gather_tensor(detached_pred, model._detach_grad_filter)
+                leaves = gather_tensor(pred, lambda x: model._detach_grad_filter(x))
+                grads = gather_tensor(detached_pred, lambda x: model._detach_grad_filter(x))
                 leaves = [leaf for leaf in leaves if leaf.numel() > 0]
                 grads = [grad.grad for grad in grads if grad.numel() > 0]
 
                 torch.autograd.backward(leaves, grads, retain_graph=True)
                 del leaves, grads
+                
 
                 if it % substep_ == substep_ - 1:
                     if args.detect_anomaly:

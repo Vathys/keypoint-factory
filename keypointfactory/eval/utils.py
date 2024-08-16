@@ -560,6 +560,40 @@ def eval_pair_depth(
     return pair_df
 
 
+def get_homography_matches(kpts0, kpts1, H, thresh=3.0):
+    kpts0_1 = warp_points_torch(kpts0, H, inverse=False)
+    kpts1_0 = warp_points_torch(kpts1, H, inverse=True)
+
+    dist0 = torch.norm(kpts0_1[:, :, None, :] - kpts1[:, None, :, :], dim=-1)
+    dist1 = torch.norm(kpts0[:, :, None, :] - kpts1_0[:, None, :, :], dim=-1)
+    dist = torch.max(dist0, dist1)
+
+    inf = dist.new_tensor(float("inf"))
+    dist = torch.where(dist < thresh, dist, inf)
+
+    min0 = dist.min(-1).indices
+    min1 = dist.min(-2).indices
+    ismin0 = torch.zeros(dist.shape, dtype=torch.bool, device=dist.device)
+    ismin1 = ismin0.clone()
+
+    ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
+    ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
+    positive = ismin0 & ismin1
+
+    pts0 = kpts0[positive.any(-1)]
+    pts1 = kpts1[positive.any(-2)]
+    unmatched0 = min0.new_tensor(-1)
+
+    m0 = torch.where(positive.any(-1), min0, unmatched0)
+
+    validm0 = m0 != -1
+
+    pts0 = kpts0[:, torch.arange(m0.shape[1], device=m0.device)[validm0[0]], :]
+    pts1 = kpts1[:, m0[0][validm0[0]], :]
+
+    return pts0, pts1
+
+
 def get_depth_matches(kpts0, kpts1, depth0, depth1, camera0, camera1, T_0to1):
     d0, valid0 = sample_depth(kpts0, depth0)
     d1, valid1 = sample_depth(kpts1, depth1)
@@ -699,13 +733,13 @@ def eval_matches_homography(data: dict, pred: dict) -> dict:
 
 
 def eval_relative_pose_robust(data, pred, conf):
-    check_keys_recursive(data, ["view0", "view1", "T_0to1"])
+    check_keys_recursive(data, ["view0", "view1"])
     check_keys_recursive(pred, ["keypoints0", "keypoints1"])
 
     T_gt = data["T_0to1"].unsqueeze(0)
     kp0 = pred["keypoints0"].unsqueeze(0)
     kp1 = pred["keypoints1"].unsqueeze(0)
-    if conf["use_depth"]:
+    if conf["use_gt"]:
         camera0 = data["view0"]["camera"].unsqueeze(0)
         camera1 = data["view1"]["camera"].unsqueeze(0)
         depth0 = data["view0"]["depth"].unsqueeze(0)
@@ -744,47 +778,43 @@ def eval_relative_pose_robust(data, pred, conf):
 
 
 def eval_homography_robust(data, pred, conf):
-    H_gt = data["H_0to1"]
-    if H_gt.ndim > 2:
-        return eval_per_batch_item(data, pred, eval_relative_pose_robust, conf)
+    check_keys_recursive(data, ["view0", "view1", "H_0to1"])
+    check_keys_recursive(pred, ["keypoints0", "keypoints1"])
+
+    H_gt = data["H_0to1"].unsqueeze(0)
+    kp0 = pred["keypoints0"].unsqueeze(0)
+    kp1 = pred["keypoints1"].unsqueeze(0)
+    if conf["use_gt"]:
+        pts0, pts1 = get_homography_matches(kp0, kp1, H_gt, conf["correctness_threshold"])
+    else:
+        descriptors0 = pred["descriptors0"].unsqueeze(0)
+        descriptors1 = pred["descriptors1"].unsqueeze(0)
+        pts0, pts1 = get_desc_matches(kp0, kp1, descriptors0, descriptors1)
+
+    results = {}
 
     estimator = load_estimator("homography", conf["estimator"])(conf)
 
-    data_ = {}
-    if "keypoints0" in pred:
-        kp0, kp1 = pred["keypoints0"], pred["keypoints1"]
-        m0, scores0 = pred["matches0"], pred["matching_scores0"]
-        pts0, pts1, _ = get_matches_scores(kp0, kp1, m0, scores0)
-        data_["m_kpts0"] = pts0
-        data_["m_kpts1"] = pts1
-    if "lines0" in pred:
-        if "orig_lines0" in pred:
-            lines0 = pred["orig_lines0"]
-            lines1 = pred["orig_lines1"]
-        else:
-            lines0 = pred["lines0"]
-            lines1 = pred["lines1"]
-        m_lines0, m_lines1, _ = get_matches_scores(
-            lines0, lines1, pred["line_matches0"], pred["line_matching_scores0"]
-        )
-        data_["m_lines0"] = m_lines0
-        data_["m_lines1"] = m_lines1
+    data_ = {
+        "m_kpts0": pts0,
+        "m_kpts1": pts1,
+    }
 
     est = estimator(data_)
-    if est["success"]:
-        M = est["M_0to1"]
-        error_r = homography_corner_error(M, H_gt, data["view0"]["image_size"]).item()
+
+    if not est["success"]:
+        results["H_error_ransac"] = float("inf")
+        results["ransac_inl"] = 0
+        results["ransac_inl%"] = 0
     else:
-        error_r = float("inf")
+        # R, t, inl = ret
+        M = est["M_0to1"]
+        inl = est["inliers"].numpy()
+        results["H_error_ransac"] = homography_corner_error(M, H_gt, data["view0"]["image_size"]).item()
+        results["ransac_inl"] = np.sum(inl)
+        results["ransac_inl%"] = np.mean(inl)
 
-    results = {}
-    results["H_error_ransac"] = error_r
-    if "inliers" in est:
-        inl = est["inliers"]
-        results["ransac_inl"] = inl.float().sum().item()
-        results["ransac_inl%"] = inl.float().sum().item() / max(len(inl), 1)
-
-    return results
+    return pd.DataFrame.from_records([results])
 
 
 def eval_homography_dlt(data, pred):

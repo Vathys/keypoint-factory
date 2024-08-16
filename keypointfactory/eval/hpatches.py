@@ -1,7 +1,9 @@
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
+from typing import Iterable
 
+import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
@@ -15,7 +17,7 @@ from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
-from .utils import eval_pair_homography
+from .utils import eval_pair_homography, eval_homography_robust
 
 
 def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):
@@ -84,6 +86,8 @@ class HPatchesPipeline(EvalPipeline):
             "padding": 4.0,
             "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
+            "use_gt": False,
+            "summarize_by_scene": True,
         },
     }
     export_keys = [
@@ -129,6 +133,12 @@ class HPatchesPipeline(EvalPipeline):
         if isinstance(conf.top_k_by, str):
             conf.top_k_by = [conf.top_k_by]
 
+        test_thresholds = (
+            ([conf.ransac_th] if conf.ransac_th > 0 else [0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+            if not isinstance(conf.ransac_th, Iterable)
+            else conf.ransac_th
+        )
+
         df_list = []
         cache_loader = CacheLoader({"path": str(pred_file), "collate": None}).eval()
         for data in tqdm(loader):
@@ -149,10 +159,21 @@ class HPatchesPipeline(EvalPipeline):
                     # This is a quick fix. Don't do this.
                     # Handle edge case when calculating repeatability
                     pair_metrics["top_k"] = top_k
-                    pair_metrics["top_by"] = top_by
-                    pair_metrics["scene"] = scene_name
+                    pair_metrics["top_by"] = str(top_by)
+                    pair_metrics["scene"] = str(scene_name)
                     pair_metrics["name"] = data["name"][0]
-                    df_list.append(pair_metrics)
+                    if self.conf.eval.estimator:
+                        for th in test_thresholds:
+                            pose_metrics = eval_homography_robust(
+                                data, pred, {**self.conf.eval, "ransac_th": th}
+                            )
+
+                            pair_metrics = pair_metrics.join(pose_metrics, how="left")
+                            pair_metrics["ransac_th"] = th
+
+                            df_list.append(pair_metrics)
+                    else:
+                        df_list.append(pair_metrics)
 
         results = pd.concat(df_list)
 
@@ -172,18 +193,40 @@ class HPatchesPipeline(EvalPipeline):
         )  # Multiple top_k by 2 because we take
         # sum of correct points from two images
 
+        def calc_auc(df):
+            hist, _ = np.histogram(
+                np.nan_to_num(
+                    df.to_numpy(np.float32), nan=0, posinf=179.95, neginf=179.95
+                ),
+                bins=10,
+            )
+            hist = hist / df.shape[0]
+            auc = hist.cumsum().mean()
+            return auc
+
+        groupby_columns = ["top_k", "top_by"]
+        if self.conf.eval.summarize_by_scene:
+            groupby_columns.append("scene")
+        agg_funcs = {
+            "num_keypoints": ("num_keypoints", "sum"),
+            "num_covisible": ("num_covisible", "sum"),
+            "num_covisible_correct": ("num_covisible_correct", "sum"),
+            "localization_score": ("localization_score", "sum"),
+            "repeatability": ("repeatability", "mean"),
+        }
+
+        if self.conf.eval.estimator:
+            agg_funcs["H_error_auc"] = ("H_error_ransac", calc_auc)
+            groupby_columns.append("ransac_th")
+
+        # Perform the aggregation
         summaries = (
-            results.groupby(["scene", "top_k", "top_by"])
+            results.groupby(groupby_columns)
             .agg(
-                num_keypoints=pd.NamedAgg(column="num_keypoints", aggfunc="sum"),
-                num_covisible=pd.NamedAgg(column="num_covisible", aggfunc="sum"),
-                num_covisible_correct=pd.NamedAgg(
-                    column="num_covisible_correct", aggfunc="sum"
-                ),
-                localization_score=pd.NamedAgg(
-                    column="localization_score", aggfunc="sum"
-                ),
-                repeatability=pd.NamedAgg(column="repeatability", aggfunc="mean"),
+                **{
+                    key: pd.NamedAgg(column=value[0], aggfunc=value[1])
+                    for key, value in agg_funcs.items()
+                }
             )
             .reset_index()
         )

@@ -13,6 +13,7 @@ from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
 from ..utils.blocks import get_module
 from ..utils.misc import distance_matrix, pad_and_stack, select_on_last, tile
+from ... import logger
 
 
 def point_distribution(logits):
@@ -752,12 +753,12 @@ class DISK(BaseModel):
             "total": loss,
             "reinforce": reinforce,
             "kp_penalty": kp_penalty,
+            "sample_lp": sample_lp_flat,
             "lm_kp": torch.tensor([self.lm_kp] * loss.shape[0], dtype=torch.float64),
             "lm_tp": torch.tensor([self.lm_tp] * loss.shape[0], dtype=torch.float64),
             "lm_fp": torch.tensor([self.lm_fp] * loss.shape[0], dtype=torch.float64),
-            "sample_lp": sample_lp_flat,
             "n_kpts": torch.tensor(
-                [logp0.shape[1]] * loss.shape[0], device=logp0.device
+                [logp0.shape[1]] * loss.shape[0], device=logp0.device, dtype=torch.float64
             ),
         }
         del (
@@ -923,8 +924,8 @@ class DISK(BaseModel):
                                     [
                                         results["error"],
                                         homography_corner_error(
-                                            M, M_gt, image_size
-                                        ).unsqueeze(0),
+                                            M, M_gt, image_size[b]
+                                        ),
                                     ]
                                 )
 
@@ -978,7 +979,7 @@ class DISK(BaseModel):
                         kpts1,
                         data["H_0to1"],
                         desc_matches,
-                        data["view0"]["image"].shape[-2:],
+                        data["view0"]["image_size"],
                         estimate="homography",
                     )
                     homography_metrics = get_match_metrics(
@@ -986,7 +987,7 @@ class DISK(BaseModel):
                         kpts1,
                         data["H_0to1"],
                         matches,
-                        data["view0"]["image"].shape[-2:],
+                        data["view1"]["image_size"],
                         estimate="homography",
                     )
 
