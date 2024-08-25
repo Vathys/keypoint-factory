@@ -1,6 +1,7 @@
 data:
   name: hpatches
   data_dir: hpatches-sequences-release
+  batch_size: 2
 
 model:
   name: triplet_pipeline
@@ -17,9 +18,9 @@ train:
   seed: 42
   epochs: 50
   log_every_iter: 100
-  eval_every_iter: 2500
-  save_every_iter: 2500
-  log_grad_every_iter: 2500
+  eval_every_iter: 270
+  save_every_iter: 270
+  log_grad_every_iter: 270
   best_key: loss/total
   lr: 1e-4
   lr_schedule:

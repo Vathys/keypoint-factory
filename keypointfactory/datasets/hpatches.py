@@ -57,7 +57,7 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
     url = "http://icvl.ee.ic.ac.uk/vbalnt/hpatches/hpatches-sequences-release.tar.gz"
 
     def _init(self, conf):
-        assert conf.batch_size == 1
+        # assert conf.batch_size == 1
         self.preprocessor = ImagePreprocessor(conf.preprocessing)
 
         self.root = DATA_PATH / conf.data_dir
@@ -75,6 +75,7 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
                 continue
             for i in range(2, 7):
                 self.items.append((seq, i, seq[0] == "i"))
+        logger.info(f"Loaded {len(self.items)} items.")
 
     def download(self):
         data_dir = self.root.parent
