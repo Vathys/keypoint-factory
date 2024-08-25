@@ -1,9 +1,9 @@
 data:
   name: homographies
   data_dir: revisitop1m
-  train_size: 150000
-  val_size: 2000
-  batch_size: 128
+  train_size: 12000
+  val_size: 1000
+  batch_size: 2
   num_workers: 14
   homography:
     difficulty: 0.7
@@ -29,7 +29,10 @@ train:
   eval_every_iter: 2500
   save_every_iter: 2500
   log_grad_every_iter: 2500
-  best_key: loss/total
+  test_every_epoch: 5
+  keep_last_checkpoints: 30
+  auc_metrics:
+    desc_H_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   lr: 1e-4
   lr_schedule:
     type: null

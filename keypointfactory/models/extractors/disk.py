@@ -694,10 +694,9 @@ class DISK(BaseModel):
         self.lm_kp = self.conf.loss.lambda_kp * ramp
 
         updated_inverse_T = torch.tensor(15.0 + 35.0 * min(1.0, 0.05 * epoch))
+        # updated_inverse_T = torch.tensor(25.0 + epoch)
 
         self.train_matcher.inverse_T.copy_(updated_inverse_T)
-
-        # self.train_matcher.inverse_T = 15.0 + 35.0 * min(1.0, 0.05 * epoch)
 
     def loss(self, pred, data):
         if self.conf.reward == "depth":
@@ -864,7 +863,7 @@ class DISK(BaseModel):
                             }
                             est = estimator(data_)
                         elif estimate == "homography":
-                            results["error"] = torch.tensor([], device=kpts0.device)
+                            results["H_error"] = torch.tensor([], device=kpts0.device)
                             estimator = load_estimator(
                                 "homography", self.conf.estimator["name"]
                             )(self.conf.estimator)
@@ -885,9 +884,9 @@ class DISK(BaseModel):
                                     ]
                                 )
                             elif estimate == "homography":
-                                results["error"] = torch.cat(
+                                results["H_error"] = torch.cat(
                                     [
-                                        results["error"],
+                                        results["H_error"],
                                         torch.tensor(
                                             [float("inf")], device=kpts0.device
                                         ),
@@ -920,9 +919,9 @@ class DISK(BaseModel):
                                     ]
                                 )
                             elif estimate == "homography":
-                                results["error"] = torch.cat(
+                                results["H_error"] = torch.cat(
                                     [
-                                        results["error"],
+                                        results["H_error"],
                                         homography_corner_error(
                                             M, M_gt, image_size[b]
                                         ),

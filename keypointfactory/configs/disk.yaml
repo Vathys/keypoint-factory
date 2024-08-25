@@ -2,7 +2,7 @@ model:
     name: two_view_pipeline
     extractor:
         name: extractors.disk
-        max_num_keypoints: 2048
+        max_num_keypoints: null
         detection_threshold: 0.0
         nms_radius: 2
         force_num_keypoints: true
@@ -15,6 +15,7 @@ benchmarks:
             estimator: degensac
             ransac_th: 1.0
             use_gt: False
+            summarize_by_scene: True
     megadepth1500:
         eval:
             top_k_thresholds: 2048
@@ -22,3 +23,4 @@ benchmarks:
             estimator: degensac
             ransac_th: 1.0
             use_gt: False
+            summarize_by_scene: True

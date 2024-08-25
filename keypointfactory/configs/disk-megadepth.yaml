@@ -31,6 +31,7 @@ model:
     force_num_keypoints: True
     detection_threshold: 0.0
     trainable: True
+    reward: depth
   batch_triplets: False
 
 train:
@@ -40,6 +41,7 @@ train:
   eval_every_iter: 2500
   save_every_iter: 2500
   log_grad_every_iter: 2500
+  test_every_epoch: 5
   keep_last_checkpoints: 30
   dataset_callback_fn: sample_new_items
   auc_metrics:
@@ -54,6 +56,9 @@ train:
 
 benchmarks:
   megadepth1500:
+    model:
+      extractor:
+        max_num_keypoints: 2048
     data:
       num_workers: 10
     eval:
