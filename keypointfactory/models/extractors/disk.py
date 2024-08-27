@@ -437,7 +437,7 @@ def depth_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
     return lm_tp * good_pairs + lm_fp * epi_bad
 
 
-def homography_rewrad(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
+def homography_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
     good_pairs = classify_by_homography(data, pred, threshold)
 
     return lm_tp * good_pairs + lm_fp * ~good_pairs
@@ -716,7 +716,7 @@ class DISK(BaseModel):
                 lm_fp=self.lm_fp,
             )
         elif self.conf.reward == "homography":
-            elementwise_reward = homography_rewrad(
+            elementwise_reward = homography_reward(
                 data,
                 pred,
                 threshold=self.conf.loss.reward_threshold,
@@ -818,7 +818,7 @@ class DISK(BaseModel):
                         .repeat(1, 1, 2),
                     )
 
-                    results["n_pairs"] = matches.shape[1]
+                    results["n_pairs"] = valid_indices0.count_nonzero(dim=1)
 
                     if estimate == "relpose":
                         good = classify_by_epipolar(
@@ -839,10 +839,6 @@ class DISK(BaseModel):
                         self.lm_tp * results["n_good"]
                         + self.lm_fp * results["n_bad"]
                         + self.lm_kp * n_kpts
-                    )
-
-                    results["n_pairs"] = torch.tensor(
-                        [results["n_pairs"]] * kpts0.shape[0], device=kpts0.device
                     )
 
                     results["ransac_inl"] = torch.tensor([], device=kpts0.device)
@@ -986,7 +982,7 @@ class DISK(BaseModel):
                         kpts1,
                         data["H_0to1"],
                         matches,
-                        data["view1"]["image_size"],
+                        data["view0"]["image_size"],
                         estimate="homography",
                     )
 

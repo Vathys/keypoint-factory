@@ -18,6 +18,7 @@ from ..utils.tensor import map_tensor
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_pair_homography, eval_homography_robust
+from ..utils.tools import AUCMetric
 
 
 def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):
@@ -194,15 +195,8 @@ class HPatchesPipeline(EvalPipeline):
         # sum of correct points from two images
 
         def calc_auc(df):
-            hist, _ = np.histogram(
-                np.nan_to_num(
-                    df.to_numpy(np.float32), nan=0, posinf=179.95, neginf=179.95
-                ),
-                bins=10,
-            )
-            hist = hist / df.shape[0]
-            auc = hist.cumsum().mean()
-            return auc
+            auc = AUCMetric(list(range(1, 11)), df)
+            return auc.compute()
 
         groupby_columns = ["top_k", "top_by"]
         if self.conf.eval.summarize_by_scene:
