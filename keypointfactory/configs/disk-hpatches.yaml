@@ -2,6 +2,13 @@ data:
   name: hpatches
   data_dir: hpatches-sequences-release
   batch_size: 2
+  preprocessing:
+    resize: 768
+    side: long
+    interpolation: bilinear
+    antialias: False
+    align_corners: False
+    square_pad: true
 
 model:
   name: triplet_pipeline
