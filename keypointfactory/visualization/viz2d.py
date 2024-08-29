@@ -162,8 +162,9 @@ def plot_matches(kpts0, kpts1, color=None, lw=1.5, ps=4, a=1.0, labels=None, axe
         color: color of each match, string or RGB tuple. Random if not given.
         lw: width of the lines.
         ps: size of the end points (no endpoint if ps=0)
-        indices: indices of the images to draw the matches on.
         a: alpha opacity of the match lines.
+        labels: list of two strings for the legend.
+        axes: list or tuple of two axes to draw the matches on.
     """
     fig = plt.gcf()
     if axes is None:
