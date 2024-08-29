@@ -14,7 +14,7 @@ data:
 model:
   name: triplet_pipeline
   extractor:
-    name: disk
+    name: diskv2
     max_num_keypoints: null
     force_num_keypoints: True
     detection_threshold: 0.0
@@ -33,6 +33,7 @@ train:
   save_every_iter: 2500
   log_grad_every_iter: 2500
   test_every_epoch: 5
+  warmup: null
   keep_last_checkpoints: 30
   auc_metrics:
     desc_H_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
