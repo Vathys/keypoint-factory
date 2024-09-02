@@ -12,28 +12,14 @@ from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
 from ..utils.blocks import get_module
-from ..utils.misc import distance_matrix, pad_and_stack, select_on_last, tile
+from ..utils.misc import (
+    distance_matrix,
+    pad_and_stack,
+    select_on_last,
+    tile,
+    lscore,
+)
 from ... import logger
-
-
-def lscore1(dist, thres):
-    return torch.where(
-        torch.isnan(dist), -float("inf"), torch.where(dist < thres, 1, 0)
-    )
-
-
-def lscore2(dist, thres):
-    return torch.where(torch.isnan(dist), -float("inf"), 1 - (dist / thres))
-
-
-def lscore3(dist, thres):
-    return torch.where(
-        torch.isnan(dist), -float("inf"), torch.log(thres / (dist + 1e-6)) / thres
-    )
-
-
-def lscore4(dist, thres):
-    return torch.where(torch.isnan(dist), -float("inf"), 1 - (dist / thres) ** 2)
 
 
 def point_distribution(logits):
@@ -127,8 +113,8 @@ class CycleMatcher:
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
 
-        dist0 = torch.norm(diff0, dim=-1)
-        dist1 = torch.norm(diff1, dim=-1)
+        dist0 = torch.norm(diff0, p=2, dim=-1)
+        dist1 = torch.norm(diff1, p=2, dim=-1)
         dist = torch.min(dist0, dist1)
         mask_visible = ~torch.isnan(dist)
         inf = dist.new_tensor(float("inf"))
@@ -392,16 +378,19 @@ def homography_reward(data, pred, threshold=2.0, lm_e=0.25):
         kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
     )
 
-    diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
-    diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
+    diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
+    diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
 
-    dist0 = torch.norm(diff0, dim=-1)
-    dist1 = torch.norm(diff1, dim=-1)
+    dist0 = torch.norm(diff0, p=2, dim=-1)
+    dist1 = torch.norm(diff1, p=2, dim=-1)
 
     reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
-    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-2).values
+    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
-    return lscore3(reproj_error0, threshold), lscore3(reproj_error1, threshold)
+    score0 = lscore(reproj_error0, threshold, type="fine")
+    score1 = lscore(reproj_error1, threshold, type="fine")
+
+    return score0, score1
 
 
 class DISK(BaseModel):
@@ -429,7 +418,6 @@ class DISK(BaseModel):
         },
         "loss": {
             "reward_threshold": 1.5,
-            "lambda_kp": 0.01,
         },
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
@@ -612,9 +600,7 @@ class DISK(BaseModel):
         }
 
     def _pre_loss_callback(self, seed, epoch):
-        ramp = max(-1, -0.2 * epoch)
-
-        self.lm_kp = self.conf.loss.lambda_kp * ramp
+        pass
 
     def loss(self, pred, data):
         if self.conf.reward == "depth":
@@ -645,23 +631,15 @@ class DISK(BaseModel):
         logp0 = pred["keypoint_scores0"]
         logp1 = pred["keypoint_scores1"]
 
-        sample_lp_flat = logp0.sum(dim=1) + logp1.sum(dim=1)
+        reinforce = (elementwise_reward0 * logp0).sum(dim=-1) + (
+            elementwise_reward1 * logp1
+        ).sum(dim=-1)
 
-        reinforce = (elementwise_reward0 * logp0).sum(dim=-1)
-        +(elementwise_reward1 * logp1).sum(dim=-1)
-
-        kp_penalty = self.lm_kp * sample_lp_flat
-
-        loss = -reinforce - kp_penalty
+        loss = -reinforce
 
         losses = {
             "total": loss,
             "reinforce": reinforce,
-            "kp_penalty": kp_penalty,
-            "lm_kp": torch.tensor(
-                [self.lm_kp] * loss.shape[0], dtype=loss.dtype, device=loss.device
-            ),
-            "sample_lp": sample_lp_flat,
             "n_kpts": (
                 torch.count_nonzero(logp0, dim=-1) + torch.count_nonzero(logp1, dim=-1)
             ).float(),
@@ -669,9 +647,7 @@ class DISK(BaseModel):
         del (
             logp0,
             logp1,
-            sample_lp_flat,
             reinforce,
-            kp_penalty,
             loss,
         )
 

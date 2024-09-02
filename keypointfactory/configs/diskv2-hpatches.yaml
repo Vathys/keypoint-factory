@@ -21,7 +21,6 @@ model:
     reward: homography
     loss:
       reward_threshold: 5
-      lambda_kp: 0
   batch_triplets: False
 
 train:

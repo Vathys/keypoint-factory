@@ -4,6 +4,33 @@ from typing import List, Optional, Tuple
 import torch
 
 
+def lscore(dist, thres, type="linear"):
+    if type == "correct":
+        return torch.where(
+            torch.isnan(dist), -float("inf"), torch.where(dist < thres, 1, -0.05)
+        )
+    elif type == "linear":
+        return torch.where(
+            torch.isnan(dist),
+            -float("inf"),
+            torch.where(dist < thres, 1 - (dist / thres), -0.05),
+        )
+    elif type == "fine":
+        return torch.where(
+            torch.isnan(dist),
+            -float("inf"),
+            torch.where(dist < thres, torch.log(thres / (dist + 1e-8)) / thres, -0.05),
+        )
+    elif type == "coarse":
+        return torch.where(
+            torch.isnan(dist),
+            -float("inf"),
+            torch.where(dist < thres, 1 - (dist / thres) ** 2, -0.05),
+        )
+    else:
+        raise RuntimeError(f"Type {type} not found...")
+
+
 def to_sequence(map):
     return map.flatten(-2).transpose(-1, -2)
 
