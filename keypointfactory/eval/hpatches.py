@@ -129,9 +129,9 @@ class HPatchesPipeline(EvalPipeline):
 
         conf = self.conf.eval
 
-        if isinstance(conf.top_k_thresholds, int):
+        if isinstance(conf.top_k_thresholds, int) or conf.top_k_thresholds is None:
             conf.top_k_thresholds = [conf.top_k_thresholds]
-        if isinstance(conf.top_k_by, str):
+        if isinstance(conf.top_k_by, str) or conf.top_k_by is None:
             conf.top_k_by = [conf.top_k_by]
 
         test_thresholds = (
@@ -152,7 +152,7 @@ class HPatchesPipeline(EvalPipeline):
                         data,
                         pred,
                         eval_to_0=False,
-                        top_k=int(top_k),
+                        top_k=int(top_k) if top_k is not None else top_k,
                         top_by=top_by,
                         thresh=conf.correctness_threshold,
                         padding=conf.padding,
@@ -185,8 +185,8 @@ class HPatchesPipeline(EvalPipeline):
                     x
                     if x is not None
                     else (
-                        self.conf.model.max_num_keypoints
-                        if self.conf.model.max_num_keypoints is not None
+                        self.conf.model.extractor.max_num_keypoints
+                        if self.conf.model.extractor.max_num_keypoints is not None
                         else float("inf")
                     )
                 )
