@@ -23,19 +23,34 @@ from ... import logger
 
 
 def point_distribution(logits):
+    budget = 4096
     proposal_dist = torch.distributions.Categorical(logits=logits)
     proposals = proposal_dist.sample()
     proposal_logp = proposal_dist.log_prob(proposals)
 
     accept_logits = select_on_last(logits, proposals).squeeze(-1)
 
-    accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
-    accept_samples = accept_dist.sample()
-    accept_logp = accept_dist.log_prob(accept_samples)
+    b, tiled_h, tiled_w = accept_logits.shape
+    
+    flat_logits = accept_logits.reshape(b, -1)
+    flat_logits = flat_logits - flat_logits.logsumexp(dim=-1, keepdim=True)
+    accept_samples = torch.zeros_like(accept_logits).to(device = accept_logits.device)
+    accept_logp = torch.zeros_like(accept_logits).to(device = accept_logits.device)
+    
+    gumbel = torch.distributions.Gumbel(0, 1)
+    sample_logits = flat_logits + gumbel.sample(flat_logits.shape).to(device=flat_logits.device)
+    topk_sample = torch.topk(sample_logits, budget, dim=-1).indices
+    
+    row_idx = topk_sample // tiled_w
+    col_idx = topk_sample % tiled_w
+    
+    for b_ in range(b):
+        accept_samples[b_, row_idx[b_], col_idx[b_]] = 1
+        accept_logp[b_, row_idx[b_], col_idx[b_]] = flat_logits[b_, topk_sample[b_]]
+    
     accept_mask = accept_samples == 1
-
+    
     logp = proposal_logp + accept_logp
-
     return proposals, accept_mask, logp
 
 
@@ -398,6 +413,7 @@ class DISK(BaseModel):
         "window_size": 8,
         "nms_radius": 2,  # matches with disk nms radius of 5
         "max_num_keypoints": None,
+        "sample_budget": 4096,
         "force_num_keypoints": False,
         "pad_if_not_divisible": True,
         "detection_threshold": 0.005,
@@ -482,7 +498,6 @@ class DISK(BaseModel):
             print(unexpected_keys)
 
         self.val_matcher = CycleMatcher()
-        self.lm_kp = self.conf.loss.lambda_kp
 
     def _sample(self, heatmaps):
         v = self.conf.window_size
