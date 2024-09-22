@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -22,8 +23,7 @@ from ..utils.misc import (
 from ... import logger
 
 
-def point_distribution(logits):
-    budget = 4096
+def point_distribution(logits, budget):
     proposal_dist = torch.distributions.Categorical(logits=logits)
     proposals = proposal_dist.sample()
     proposal_logp = proposal_dist.log_prob(proposals)
@@ -259,11 +259,11 @@ class CycleMatcher:
 
 
 class Unet(torch.nn.Module):
-    def __init__(self, in_features, down, up, conf):
+    def __init__(self, in_features, conf):
         super(Unet, self).__init__()
 
-        self.up = up
-        self.down = down
+        self.up = [int(u) for u in conf.arch.up]
+        self.down = [int(d) for d in conf.arch.down]
         self.in_features = in_features
 
         size = conf.arch.kernel_size
@@ -271,7 +271,7 @@ class Unet(torch.nn.Module):
         down_block = get_module(conf.arch.down_block)
         up_block = get_module(conf.arch.up_block)
 
-        down_dims = [in_features] + down
+        down_dims = [in_features] + self.down
         self.path_down = torch.nn.ModuleList()
         for i, (d_in, d_out) in enumerate(zip(down_dims[:-1], down_dims[1:])):
             block = down_block(
@@ -279,11 +279,11 @@ class Unet(torch.nn.Module):
             )
             self.path_down.append(block)
 
-        bottom_dims = [down[-1]] + up
+        bottom_dims = [self.down[-1]] + self.up
         horizontal_dims = down_dims[-2::-1]
         self.path_up = torch.nn.ModuleList()
         for i, (d_bot, d_hor, d_out) in enumerate(
-            zip(bottom_dims, horizontal_dims, up)
+            zip(bottom_dims, horizontal_dims, self.up)
         ):
             block = up_block(d_bot, d_hor, d_out, size=size, name=f"up_{i}", conf=conf)
             self.path_up.append(block)
@@ -402,8 +402,8 @@ def homography_reward(data, pred, threshold=2.0, lm_e=0.25):
     reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
     reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
-    score0 = lscore(reproj_error0, threshold, type="fine")
-    score1 = lscore(reproj_error1, threshold, type="fine")
+    score0 = lscore(reproj_error0, threshold, type="coarse")
+    score1 = lscore(reproj_error1, threshold, type="coarse")
 
     return score0, score1
 
@@ -423,6 +423,8 @@ class DISK(BaseModel):
             "kernel_size": 5,
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
+            "down": [16, 32, 64, 64, 64],
+            "up": [64, 64, 64, 1],
             "upsample": "TrivialUpsample",
             "downsample": "TrivialDownsample",
             "down_block": "ThinDownBlock",  # second option is DownBlock
@@ -445,8 +447,6 @@ class DISK(BaseModel):
 
         self.unet = Unet(
             in_features=3,
-            down=[16, 32, 64, 64, 64],
-            up=[64, 64, 64, 1],
             conf=self.conf,
         )
 
@@ -509,7 +509,7 @@ class DISK(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(tiled)
+        proposals, accept_mask, logp = point_distribution(tiled, self.conf.sample_budget)
 
         cgrid = torch.stack(
             torch.meshgrid(
