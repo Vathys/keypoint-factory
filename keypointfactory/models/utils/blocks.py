@@ -101,7 +101,7 @@ class DownBlock(nn.Module):
             padding_size = 0
 
         sequence_list = []
-        if not is_first:
+        if is_first:
             self.downsample = NoOp()
         else:
             self.downsample = get_module(conf.arch.downsample)(in_, size, conf=conf)
@@ -179,7 +179,7 @@ class UpBlock(nn.Module):
 
     def forward(self, bottom, horizontal):
         up_bot = self.upsample(bottom)
-        horizontal = cut_to_match(up_bot, horizontal, n_pred=2)
+        horizontal = cut_to_match(up_bot, horizontal, n_pref=2)
         combined = torch.cat([up_bot, horizontal], dim=1)
 
         return self.sequence(combined)
