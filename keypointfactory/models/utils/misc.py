@@ -3,6 +3,8 @@ from typing import List, Optional, Tuple
 
 import torch
 
+from ...geometry.homography import warp_points_torch
+
 
 def lscore(dist, thres, type="linear"):
     if type == "correct":
@@ -29,6 +31,12 @@ def lscore(dist, thres, type="linear"):
         )
     else:
         raise RuntimeError(f"Type {type} not found...")
+
+
+def and_mult(a, b):
+    return torch.mul(a.abs(), b.abs()) * torch.where(
+        torch.logical_and(a > 0, b > 0), 1, -1
+    )
 
 
 def to_sequence(map):
@@ -170,3 +178,60 @@ def distance_matrix(fs1, fs2):
         fs2 = torch.zeros((fs2.shape[0], 1, fs2.shape[2]), device=fs2.device)
     dist = torch.einsum("...if,...jf->...ij", fs1, fs2)
     return 1.414213 * (1.0 - dist).clamp(min=1e-6).sqrt()
+
+
+def unproject(kpts, depth, cam, pose):
+    batch, h, w = depth.shape
+    in_range = (
+        (0 <= kpts[:, :, 0])
+        & (kpts[:, :, 0] < w)
+        & (0 <= kpts[:, :, 1])
+        & (kpts[:, :, 1] < h)
+    )
+    finite = torch.isfinite(kpts).all(dim=2)
+    valid_depth = in_range & finite
+
+    valid_kpts = []
+    for b in range(batch):
+        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
+    fdepth = torch.full(
+        kpts.shape[:2],
+        fill_value=float("NaN"),
+        device=kpts.device,
+        dtype=kpts.dtype,
+    )
+
+    for b in range(batch):
+        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
+
+    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
+    kptsw = pose.inv().transform(kptsc)
+
+    return kptsw
+
+
+def project(kptsw, cam, pose):
+    ext = pose.transform(kptsw)
+    kpts, _ = cam.cam2image(ext)
+    return kpts
+
+
+def reproject_homography(kpts, H, h, w, inverse):
+    kptsw = warp_points_torch(kpts, H, inverse)
+
+    valid = (
+        (0 <= kptsw[:, :, 0])
+        & (kptsw[:, :, 0] < w)
+        & (0 <= kptsw[:, :, 1])
+        & (kptsw[:, :, 1] < h)
+    )
+
+    nkpts = torch.full(
+        kpts.shape,
+        fill_value=float("NaN"),
+        device=kpts.device,
+        dtype=kpts.dtype,
+    )
+    nkpts[valid] = kptsw[valid]
+
+    return nkpts
