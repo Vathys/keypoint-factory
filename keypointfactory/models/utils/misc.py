@@ -7,31 +7,40 @@ from ...geometry.homography import warp_points_torch
 
 
 def lscore(dist, thres, type="linear"):
+    score = None
     if type == "correct":
-        return torch.where(
+        score = torch.where(
             torch.isnan(dist), -float("inf"), torch.where(dist < thres, 1, -0.05)
         )
     elif type == "linear":
-        return torch.where(
+        score = torch.where(
             torch.isnan(dist),
             -float("inf"),
-            torch.where(dist < thres, 1 - (dist / thres), -0.05),
+            1 - (dist / thres)
         )
     elif type == "fine":
-        return torch.where(
+        score = torch.where(
             torch.isnan(dist),
             -float("inf"),
-            torch.where(dist < thres, torch.log(thres / (dist + 1e-8)) / thres, -0.05),
+            torch.log(thres / (dist + 1e-8)) / thres
         )
     elif type == "coarse":
-        return torch.where(
+        score = torch.where(
             torch.isnan(dist),
             -float("inf"),
-            torch.where(dist < thres, 1 - (dist / thres) ** 2, -0.05),
+            1 - (dist / thres) ** 2
         )
     else:
         raise RuntimeError(f"Type {type} not found...")
 
+    score_ = score.clone()
+    for b in range(score_.shape[0]):
+        if (score_[b] < 0).sum() > 0:
+            score_[b][score_[b] < 0] = score_[b][score_[b] < 0] / score_[b][score_[b] < 0].abs().max()
+        if (score_[b] > 0).sum() > 0:
+            score_[b][score_[b] > 0] = score_[b][score_[b] > 0] / score_[b][score_[b] > 0].abs().max()
+    
+    return score_
 
 def and_mult(a, b):
     return torch.mul(a.abs(), b.abs()) * torch.where(

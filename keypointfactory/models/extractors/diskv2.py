@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -22,8 +23,24 @@ from ..utils.misc import (
 from ... import logger
 
 
-def point_distribution(logits):
-    budget = 4096
+# def point_distribution(logits, budget): # budget only included for faster testing
+#     proposal_dist = torch.distributions.Categorical(logits=logits)
+#     proposals = proposal_dist.sample()
+#     proposal_logp = proposal_dist.log_prob(proposals)
+# 
+#     accept_logits = select_on_last(logits, proposals).squeeze(-1)
+# 
+#     accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
+#     accept_samples = accept_dist.sample()
+#     accept_logp = accept_dist.log_prob(accept_samples)
+#     accept_mask = accept_samples == 1
+# 
+#     logp = proposal_logp + accept_logp
+# 
+#     return proposals, accept_mask, logp
+
+
+def point_distribution(logits, budget):
     proposal_dist = torch.distributions.Categorical(logits=logits)
     proposals = proposal_dist.sample()
     proposal_logp = proposal_dist.log_prob(proposals)
@@ -33,26 +50,21 @@ def point_distribution(logits):
     b, tiled_h, tiled_w = accept_logits.shape
 
     flat_logits = accept_logits.reshape(b, -1)
-    flat_logits = flat_logits - flat_logits.logsumexp(dim=-1, keepdim=True)
-    accept_samples = torch.zeros_like(accept_logits).to(device=accept_logits.device)
-    accept_logp = torch.zeros_like(accept_logits).to(device=accept_logits.device)
+    
+    gumbel_dist = torch.distributions.Gumbel(0, 1)
+    gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(logits.device)
+    topk_indices = torch.topk(gumbel_scores, budget, dim=-1).indices
 
-    gumbel = torch.distributions.Gumbel(0, 1)
-    sample_logits = flat_logits + gumbel.sample(flat_logits.shape).to(
-        device=flat_logits.device
-    )
-    topk_sample = torch.topk(sample_logits, budget, dim=-1).indices
-
-    row_idx = topk_sample // tiled_w
-    col_idx = topk_sample % tiled_w
-
-    for b_ in range(b):
-        accept_samples[b_, row_idx[b_], col_idx[b_]] = 1
-        accept_logp[b_, row_idx[b_], col_idx[b_]] = flat_logits[b_, topk_sample[b_]]
+    accept_samples = torch.zeros_like(flat_logits)
+    accept_samples.scatter_(-1, topk_indices, 1)
+    accept_samples = accept_samples.reshape(b, tiled_h, tiled_w)
 
     accept_mask = accept_samples == 1
 
+    accept_logp = torch.log_softmax(accept_logits, dim=-1)
+    accept_logp = accept_logp.reshape(b, tiled_h, tiled_w)
     logp = proposal_logp + accept_logp
+    
     return proposals, accept_mask, logp
 
 
@@ -260,6 +272,52 @@ class CycleMatcher:
         return matches.transpose(1, 2)
 
 
+class Unet(torch.nn.Module):
+    def __init__(self, in_features, conf):
+        super(Unet, self).__init__()
+
+        self.up = [int(u) for u in conf.arch.up]
+        self.down = [int(d) for d in conf.arch.down]
+        self.in_features = in_features
+
+        size = conf.arch.kernel_size
+
+        down_block = get_module(conf.arch.down_block)
+        up_block = get_module(conf.arch.up_block)
+
+        down_dims = [in_features] + self.down
+        self.path_down = torch.nn.ModuleList()
+        for i, (d_in, d_out) in enumerate(zip(down_dims[:-1], down_dims[1:])):
+            block = down_block(
+                d_in, d_out, size=size, name=f"down_{i}", is_first=i == 0, conf=conf
+            )
+            self.path_down.append(block)
+
+        bottom_dims = [self.down[-1]] + self.up
+        horizontal_dims = down_dims[-2::-1]
+        self.path_up = torch.nn.ModuleList()
+        for i, (d_bot, d_hor, d_out) in enumerate(
+            zip(bottom_dims, horizontal_dims, self.up)
+        ):
+            block = up_block(d_bot, d_hor, d_out, size=size, name=f"up_{i}", conf=conf)
+            self.path_up.append(block)
+
+        self.n_params = 0
+        for params in self.parameters():
+            self.n_params += params.numel()
+
+    def forward(self, input):
+        features = [input]
+        for block in self.path_down:
+            features.append(block(features[-1]))
+
+        f_bot = features[-1]
+        features_horizontal = features[-2::-1]
+        for layer, f_hor in zip(self.path_up, features_horizontal):
+            f_bot = layer(f_bot, f_hor)
+
+        return f_bot
+
 def classify_by_homography(data, pred, threshold=2.0):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
@@ -335,7 +393,7 @@ def depth_reward(data, pred, threshold=2.0, lm_tp=1.0, lm_fp=-0.25):
     return lm_tp * good_pairs + lm_fp * epi_bad
 
 
-def homography_reward(data, pred, threshold=2.0, lm_e=0.25):
+def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
@@ -357,8 +415,8 @@ def homography_reward(data, pred, threshold=2.0, lm_e=0.25):
     reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
     reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
-    score0 = lscore(reproj_error0, threshold, type="fine")
-    score1 = lscore(reproj_error1, threshold, type="fine")
+    score0 = lscore(reproj_error0, threshold, type=score_type)
+    score1 = lscore(reproj_error1, threshold, type=score_type)
 
     return score0, score1
 
@@ -390,6 +448,7 @@ class DISK(BaseModel):
             "train_invT": False,
         },
         "loss": {
+            "score_type": "coarse",
             "reward_threshold": 1.5,
         },
         "estimator": {"name": "degensac", "ransac_th": 1.0},
@@ -464,7 +523,7 @@ class DISK(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(tiled)
+        proposals, accept_mask, logp = point_distribution(tiled, self.conf.sample_budget)
 
         cgrid = torch.stack(
             torch.meshgrid(
@@ -594,6 +653,7 @@ class DISK(BaseModel):
                 data,
                 pred,
                 threshold=self.conf.loss.reward_threshold,
+                score_type=self.conf.loss.score_type,
             )
         else:
             raise ValueError(f"Unknown reward type {self.conf.reward}")

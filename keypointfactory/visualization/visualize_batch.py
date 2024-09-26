@@ -56,8 +56,8 @@ def make_reward_figures(pred_, data_, n_pairs=2):
         reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
         reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-2).values
 
-        threshold = 5.0
-        type = "fine"
+        threshold = 3.0
+        type = "linear"
 
         score0 = lscore(reproj_error0, threshold, type=type)
         score1 = lscore(reproj_error1, threshold, type=type)
