@@ -11,7 +11,7 @@ from ...geometry.homography import warp_points_torch, homography_corner_error
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
-from ..utils.blocks import get_module
+from ..utils.unet import Unet
 from ..utils.misc import distance_matrix, pad_and_stack, select_on_last, tile
 from ... import logger
 
@@ -314,54 +314,6 @@ class CycleMatcher:
         return matches.transpose(1, 2)
 
 
-class Unet(torch.nn.Module):
-
-    def __init__(self, in_features, down, up, conf):
-        super(Unet, self).__init__()
-
-        self.up = up
-        self.down = down
-        self.in_features = in_features
-
-        size = conf.arch.kernel_size
-
-        down_block = get_module(conf.arch.down_block)
-        up_block = get_module(conf.arch.up_block)
-
-        down_dims = [in_features] + down
-        self.path_down = torch.nn.ModuleList()
-        for i, (d_in, d_out) in enumerate(zip(down_dims[:-1], down_dims[1:])):
-            block = down_block(
-                d_in, d_out, size=size, name=f"down_{i}", is_first=i == 0, conf=conf
-            )
-            self.path_down.append(block)
-
-        bottom_dims = [down[-1]] + up
-        horizontal_dims = down_dims[-2::-1]
-        self.path_up = torch.nn.ModuleList()
-        for i, (d_bot, d_hor, d_out) in enumerate(
-            zip(bottom_dims, horizontal_dims, up)
-        ):
-            block = up_block(d_bot, d_hor, d_out, size=size, name=f"up_{i}", conf=conf)
-            self.path_up.append(block)
-
-        self.n_params = 0
-        for params in self.parameters():
-            self.n_params += params.numel()
-
-    def forward(self, input):
-        features = [input]
-        for block in self.path_down:
-            features.append(block(features[-1]))
-
-        f_bot = features[-1]
-        features_horizontal = features[-2::-1]
-        for layer, f_hor in zip(self.path_up, features_horizontal):
-            f_bot = layer(f_bot, f_hor)
-
-        return f_bot
-
-
 def classify_by_homography(data, pred, threshold=2.0):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
@@ -476,15 +428,16 @@ class DISK(BaseModel):
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
-    requred_data_keys = ["image"]
+    required_data_keys = ["image"]
 
     def _init(self, conf):
         self.set_initialized()
 
+        self.conf.arch["down"] = [16, 32, 64, 64, 64]
+        self.conf.arch["up"] = [64, 64, 64, self.conf.desc_dim + 1]
+
         self.unet = Unet(
             in_features=3,
-            down=[16, 32, 64, 64, 64],
-            up=[64, 64, 64, self.conf.desc_dim + 1],
             conf=self.conf,
         )
 
@@ -757,7 +710,9 @@ class DISK(BaseModel):
             "lm_tp": torch.tensor([self.lm_tp] * loss.shape[0], dtype=torch.float64),
             "lm_fp": torch.tensor([self.lm_fp] * loss.shape[0], dtype=torch.float64),
             "n_kpts": torch.tensor(
-                [logp0.shape[1]] * loss.shape[0], device=logp0.device, dtype=torch.float64
+                [logp0.shape[1]] * loss.shape[0],
+                device=logp0.device,
+                dtype=torch.float64,
             ),
         }
         del (
@@ -918,9 +873,7 @@ class DISK(BaseModel):
                                 results["H_error"] = torch.cat(
                                     [
                                         results["H_error"],
-                                        homography_corner_error(
-                                            M, M_gt, image_size[b]
-                                        ),
+                                        homography_corner_error(M, M_gt, image_size[b]),
                                     ]
                                 )
 

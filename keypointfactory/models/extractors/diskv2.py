@@ -12,7 +12,7 @@ from ...geometry.homography import warp_points_torch, homography_corner_error
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
-from ..utils.blocks import get_module
+from ..utils.unet import Unet
 from ..utils.misc import (
     distance_matrix,
     pad_and_stack,
@@ -48,9 +48,9 @@ def point_distribution(logits, budget):
     accept_logits = select_on_last(logits, proposals).squeeze(-1)
 
     b, tiled_h, tiled_w = accept_logits.shape
-    
-    flat_logits = accept_logits.reshape(b, -1)
 
+    flat_logits = accept_logits.reshape(b, -1)
+    
     gumbel_dist = torch.distributions.Gumbel(0, 1)
     gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(logits.device)
     topk_indices = torch.topk(gumbel_scores, budget, dim=-1).indices
@@ -318,7 +318,6 @@ class Unet(torch.nn.Module):
 
         return f_bot
 
-
 def classify_by_homography(data, pred, threshold=2.0):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
@@ -455,7 +454,7 @@ class DISK(BaseModel):
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
-    requred_data_keys = ["image"]
+    required_data_keys = ["image"]
 
     def _init(self, conf):
         self.set_initialized()
