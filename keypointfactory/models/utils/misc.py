@@ -14,19 +14,19 @@ def lscore(dist, thres, type="linear"):
         score = torch.where(
             torch.isnan(dist),
             -float("inf"),
-            torch.where(dist < thres, 1 - (dist / thres), -0.05),
+            1 - (dist / thres)
         )
     elif type == "fine":
         score = torch.where(
             torch.isnan(dist),
             -float("inf"),
-            torch.where(dist < thres, torch.log(thres / (dist + 1e-8)) / thres, -0.05),
+            torch.log(thres / (dist + 1e-8)) / thres
         )
     elif type == "coarse":
         score = torch.where(
             torch.isnan(dist),
             -float("inf"),
-            torch.where(dist < thres, 1 - (dist / thres) ** 2, -0.05),
+            1 - (dist / thres) ** 2
         )
     else:
         raise RuntimeError(f"Type {type} not found...")
