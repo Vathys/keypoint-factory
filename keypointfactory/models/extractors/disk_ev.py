@@ -18,7 +18,7 @@ from ..utils.misc import (
 )
 
 
-def point_distribution(logits, budget):
+def point_distribution(logits, budget=-1):
     proposal_dist = torch.distributions.Categorical(logits=logits)
     proposals = proposal_dist.sample()
     proposal_logp = proposal_dist.log_prob(proposals)
@@ -72,7 +72,7 @@ def depth_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
     def get_score(kpts, kpts_o, T, T_o, cam, cam_o, depth_o):
         kpts_r = project(unproject(kpts_o, depth_o, cam_o, T_o), cam, T)
 
-        diff = kpts_r[:, None, :, :] - kpts[:, :, None, :]
+        diff = kpts[:, :, None, :] - kpts_r[:, None, :, :]
 
         dist = torch.norm(diff, p=2, dim=-1)
 
@@ -87,11 +87,11 @@ def depth_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
     error0_2 = get_score(kpts2, kpts0, T2, T0, camera2, camera0, depth0)
     error1_2 = get_score(kpts2, kpts1, T2, T1, camera2, camera1, depth1)
 
-    reward0 = and_mult(error1_0, error2_0)
-    reward1 = and_mult(error0_1, error2_1)
-    reward2 = and_mult(error0_2, error1_2)
-
-    # substitute epipolar reward for when depth is not available. Multiple by lm_e to make it less important
+    ereward0, ereward1, ereward2 = epipolar_reward(data, pred, threshold, score_type)
+    
+    reward0 = and_mult(error1_0, error2_0) + lm_e * ereward0
+    reward1 = and_mult(error0_1, error2_1) + lm_e * ereward1
+    reward2 = and_mult(error0_2, error1_2) + lm_e * ereward2
 
     return reward0, reward1, reward2
 
@@ -99,26 +99,27 @@ def depth_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
 def epipolar_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
     kpts0, kpts1, kpts2 = pred["keypoints0"], pred["keypoints1"], pred["keypoints2"]
 
-    F_0to1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], pred["T_0to1"])
-    F_0to2 = T_to_F(data["view0"]["camera"], data["view2"]["camera"], pred["T_0to2"])
-    F_1to2 = T_to_F(data["view1"]["camera"], data["view2"]["camera"], pred["T_1to2"])
+    camera0, camera1, camera2 = (
+        data["view0"]["camera"],
+        data["view1"]["camera"],
+        data["view2"]["camera"],
+    )
+    
+    def get_score(kpts, kpts_o, camera, camera_o, T):
+        F = T_to_F(camera, camera_o, T)
 
-    def get_score(kpts, kpts_o, F, inverse):
-        if inverse:
-            F = F.inverse()
-
-        dist = asymm_epipolar_distance_all(kpts_o, kpts, F).abs()
+        dist = asymm_epipolar_distance_all(kpts, kpts_o, F).abs()
 
         reproj_error = torch.min(dist.nan_to_num(nan=float("inf")), dim=-1).values
 
         return lscore(reproj_error, threshold, score_type)
 
-    error1_0 = get_score(kpts0, kpts1, F_0to1, True)
-    error2_0 = get_score(kpts0, kpts2, F_0to2, True)
-    error0_1 = get_score(kpts1, kpts0, F_0to1, False)
-    error2_1 = get_score(kpts1, kpts2, F_1to2, True)
-    error0_2 = get_score(kpts2, kpts0, F_0to2, False)
-    error1_2 = get_score(kpts2, kpts1, F_1to2, False)
+    error1_0 = get_score(kpts0, kpts1, camera0, camera1, data["T_0to1"])
+    error2_0 = get_score(kpts0, kpts2, camera0, camera2, data["T_0to2"])
+    error0_1 = get_score(kpts1, kpts0, camera1, camera0, data["T_1to0"])
+    error2_1 = get_score(kpts1, kpts2, camera1, camera2, data["T_1to2"])
+    error0_2 = get_score(kpts2, kpts0, camera2, camera0, data["T_2to0"])
+    error1_2 = get_score(kpts2, kpts1, camera2, camera1, data["T_2to1"])
 
     reward0 = and_mult(error1_0, error2_0)
     reward1 = and_mult(error0_1, error2_1)
@@ -130,13 +131,13 @@ def epipolar_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
 def homography_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
     kpts0, kpts1, kpts2 = pred["keypoints0"], pred["keypoints1"], pred["keypoints2"]
 
-    H_0to1 = pred["H_0to1"]
-    H_0to2 = pred["H_0to2"]
-    H_1to2 = pred["H_1to2"]
+    H_0to1 = data["H_0to1"]
+    H_0to2 = data["H_0to2"]
+    H_1to2 = data["H_1to2"]
 
-    def get_score(kpts, kpts_o, H, type, img_bounds, inverse):
+    def get_score(kpts, kpts_o, H, img_bounds, inverse):
         kpts_r = reproject_homography(kpts_o, H, *img_bounds, inverse)
-        diff = kpts_r[:, None, :, :] - kpts[:, :, None, :]
+        diff = kpts[:, :, None, :] - kpts_r[:, None, :, :]
 
         dist = torch.norm(diff, p=2, dim=-1)
 
@@ -163,15 +164,19 @@ class DISK_EV(BaseModel):
         "window_size": 8,
         "nms_radius": 2,  # matches with disk nms radius of 5
         "max_num_keypoints": None,
+        "sample_budget": 4096,
         "force_num_keypoints": False,
         "pad_if_not_divisible": True,
         "detection_threshold": 0.005,
         "weights": None,
         "reward": "depth",
+        "pad_edges": 4,
         "arch": {
             "kernel_size": 5,
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
+            "down": [16, 32, 64, 64],
+            "up": [64, 64, 1],
             "upsample": "TrivialUpsample",
             "downsample": "TrivialDownsample",
             "down_block": "ThinDownBlock",
@@ -194,7 +199,7 @@ class DISK_EV(BaseModel):
     def _init(self, conf):
         self.set_initialized()
 
-        self.unet = Unet(in_features=3, down=[16, 32, 64], up=[64, 64, 1])
+        self.unet = Unet(in_features=3, conf=self.conf)
 
         state_dict = None
         if conf.weights:
@@ -233,7 +238,7 @@ class DISK_EV(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(tiled)
+        proposals, accept_mask, logp = point_distribution(tiled, self.conf.sample_budget)
 
         cgrid = torch.stack(
             torch.meshgrid(
@@ -332,6 +337,14 @@ class DISK_EV(BaseModel):
             keypoints = torch.stack(keypoints, 0)
             scores = torch.stack(scores, 0)
 
+        if self.conf.pad_edges > 0:
+            image_shape = torch.tensor(images.shape[:2][::-1])
+            vis = torch.all(
+                (keypoints >= self.conf.pad_edges) & (keypoints <= image_shape - self.conf.pad_edges), dim=-1
+            )
+            keypoints = keypoints[vis].view(keypoints.size(0), -1, 2)
+            keypoint_scores = scores[vis].view(keypoint_scores.size(0), -1)
+        
         return {
             "keypoints": keypoints.float(),
             "heatmap": heatmap,
