@@ -45,9 +45,12 @@ class TripletPipeline(TwoViewPipeline):
             **{k + "2": v for k, v in pred2.items()},
         }
 
-        for idx in ["0to1", "0to2", "1to2"]:
-            pred[idx] = get_twoview(all_pred, idx)
-
+        if self.conf.enumerate_pairs:
+            for idx in ["0to1", "0to2", "1to2"]:
+                pred[idx] = get_twoview(all_pred, idx)
+        else:
+            pred = all_pred
+        
         return pred
 
     def _pre_loss_callback(self, seed, epoch):
