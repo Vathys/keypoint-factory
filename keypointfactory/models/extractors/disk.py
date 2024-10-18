@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -407,9 +408,12 @@ class DISK(BaseModel):
         "weights": None,
         "reward": "depth",
         "arch": {
+            "type": "original",
             "kernel_size": 5,
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
+            "down": [],
+            "up": [],
             "upsample": "TrivialUpsample",
             "downsample": "TrivialDownsample",
             "down_block": "ThinDownBlock",  # second option is DownBlock
@@ -433,8 +437,12 @@ class DISK(BaseModel):
     def _init(self, conf):
         self.set_initialized()
 
-        self.conf.arch["down"] = [16, 32, 64, 64, 64]
-        self.conf.arch["up"] = [64, 64, 64, self.conf.desc_dim + 1]
+        if self.conf.arch.type == "original":
+            self.conf = OmegaConf.merge(self.conf, OmegaConf.create({"arch": {"down": [16, 32, 64, 64, 64], "up": [64, 64, 64, self.conf.desc_dim + 1], "down_block": "ThinDownBlock", "up_block": "ThinUpBlock"}}))
+        elif self.conf.arch.type == "two_block":
+            self.conf = OmegaConf.merge(self.conf, OmegaConf.create({"arch": {"down": [16, 32, 64], "up": [64, self.conf.desc_dim + 1], "down_block": "ResDownBlock", "up_block": "ResUpBlock"}}))
+        else:
+            raise RuntimeError(f"Architecture type {self.conf.arch.type} not found. Select from [\"original\", \"two_block\"].")
 
         self.unet = Unet(
             in_features=3,
