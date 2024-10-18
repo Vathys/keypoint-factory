@@ -9,19 +9,22 @@ data:
     antialias: False
     align_corners: False
     square_pad: true
+  triplets: true
 
 model:
   name: triplet_pipeline
   extractor:
     name: diskv2
     max_num_keypoints: null
-    force_num_keypoints: True
+    force_num_keypoints: true
     detection_threshold: 0.0
-    trainable: True
+    trainable: true
     reward: homography
     loss:
-      reward_threshold: 5
-  batch_triplets: False
+      reward_threshold: 3
+      score_type: coarse
+  batch_triplets: false
+  enumerate_pairs: true
 
 train:
   seed: 42
@@ -33,7 +36,7 @@ train:
   best_key: loss/total
   auc_metrics:
     homography_H_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-  lr: 1e-5
+  lr: 1e-4
   lr_schedule:
     type: null
   lr_scaling: [()]
@@ -51,5 +54,5 @@ benchmarks:
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
-      use_gt: False
-      summarize_by_scene: False
+      use_gt: true
+      summarize_by_scene: false

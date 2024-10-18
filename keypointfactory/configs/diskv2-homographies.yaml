@@ -4,7 +4,8 @@ data:
   train_size: 12000
   val_size: 1000
   batch_size: 2
-  num_workers: 14
+  triplet: true
+  num_workers: 8
   homography:
     difficulty: 0.7
     max_angle: 90
@@ -16,28 +17,29 @@ model:
   extractor:
     name: diskv2
     max_num_keypoints: null
-    force_num_keypoints: True
+    force_num_keypoints: true
     detection_threshold: 0.0
     trainable: True
     reward: homography
     loss:
-      reward_threshold: 5
-      lambda_kp: 0
-  batch_triplets: False
+      reward_threshold: 3
+      score_type: coarse
+  batch_triplets: false
+  enumerate_pairs: true
 
 train:
   seed: 42
   epochs: 50
   log_every_iter: 100
-  eval_every_iter: 2500
+  eval_every_iter: 1000
   save_every_iter: 2500
-  log_grad_every_iter: 2500
+  log_grad_every_iter: 500
   test_every_epoch: 5
   warmup: null
   keep_last_checkpoints: 30
   auc_metrics:
     desc_H_error: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-  lr: 1e-5
+  lr: 1e-4
   lr_schedule:
     type: null
   lr_scaling: [()]
@@ -51,9 +53,9 @@ benchmarks:
     data:
       num_workers: 10
     eval:
-      top_k_thresholds: 1024
+      top_k_thresholds: 2048
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
-      use_gt: False
-      summarize_by_scene: False
+      use_gt: true
+      summarize_by_scene: true

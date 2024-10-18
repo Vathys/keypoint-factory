@@ -4,10 +4,11 @@ data:
   train_size: 12000
   val_size: 1000
   batch_size: 2
-  num_workers: 14
+  triplet: true
+  num_workers: 8
   homography:
     difficulty: 0.7
-    max_angle: 45
+    max_angle: 90
   photometric:
     name: lg
 
@@ -16,11 +17,12 @@ model:
   extractor:
     name: disk
     max_num_keypoints: null
-    force_num_keypoints: True
+    force_num_keypoints: true
     detection_threshold: 0.0
-    trainable: True
+    trainable: true
     reward: homography
-  batch_triplets: False
+  batch_triplets: false
+  enumerate_pairs: true
 
 train:
   seed: 42
@@ -47,9 +49,9 @@ benchmarks:
     data:
       num_workers: 10
     eval:
-      top_k_thresholds: 1024
+      top_k_thresholds: 2048
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
-      use_gt: False
-      summarize_by_scene: False
+      use_gt: true
+      summarize_by_scene: true

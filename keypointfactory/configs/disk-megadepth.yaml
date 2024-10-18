@@ -5,8 +5,8 @@ data:
     resize: 768
     side: long
     interpolation: bilinear
-    antialias: False
-    align_corners: False
+    antialias: false
+    align_corners: false
     square_pad: true
   train_split: disk_train_scenes.txt
   train_num_per_scene: 62
@@ -21,18 +21,19 @@ data:
   triplet_enforce_overlap: false
   seed: 42
   load_features:
-    do: False
+    do: false
 
 model:
   name: triplet_pipeline
   extractor:
     name: disk
     max_num_keypoints: null
-    force_num_keypoints: True
+    force_num_keypoints: true
     detection_threshold: 0.0
-    trainable: True
+    trainable: true
     reward: depth
-  batch_triplets: False
+  batch_triplets: false
+  enumerate_pairs: false
 
 train:
   seed: 42
@@ -50,7 +51,7 @@ train:
   lr_schedule:
     type: null
   lr_scaling: [()]
-  mixed_precision: False
+  mixed_precision: false
   plot: [5, 'keypointfactory.visualization.visualize_batch.make_keypoint_figures']
   substep: 1
 
@@ -66,5 +67,5 @@ benchmarks:
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
-      use_depth: False
-      summarize_by_scene: False
+      use_depth: false
+      summarize_by_scene: false

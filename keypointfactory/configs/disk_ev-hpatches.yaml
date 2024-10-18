@@ -14,14 +14,16 @@ data:
 model:
   name: triplet_pipeline
   extractor:
-    name: disk
+    name: disk_ev
     max_num_keypoints: null
     force_num_keypoints: true
     detection_threshold: 0.0
-    trainable: True
+    trainable: true
     reward: homography
+    loss:
+      reward_threshold: 3
   batch_triplets: false
-  enumerate_pairs: true
+  enumerate_pairs: false
 
 train:
   seed: 42
@@ -51,5 +53,5 @@ benchmarks:
       top_k_by: "scores"
       estimator: "degensac"
       ransac_th: 1.0
-      use_gt: false
+      use_gt: true
       summarize_by_scene: false
