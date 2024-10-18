@@ -14,6 +14,7 @@ import torch
 from ..utils.misc import get_twoview, stack_twoviews
 from .two_view_pipeline import TwoViewPipeline
 
+from .. import logger
 
 def has_triplet(data):
     # we already check for image0 and image1 in required_keys
@@ -23,13 +24,14 @@ def has_triplet(data):
 class TripletPipeline(TwoViewPipeline):
     default_conf = {
         "batch_triplets": False,
-        "enumerate_pairs": False,
+        "enumerate_pairs": True,
         **TwoViewPipeline.default_conf,
     }
 
     def _forward(self, data):
         if not has_triplet(data):
-            return super()._forward(data)
+            raise RuntimeError("No triplets found.")
+            # return super()._forward(data)
         # the two-view outputs are stored in
         # pred['0to1'],pred['0to2'], pred['1to2']
 
@@ -38,7 +40,6 @@ class TripletPipeline(TwoViewPipeline):
         pred1 = self.extract_view(data, "1")
         pred2 = self.extract_view(data, "2")
 
-        pred = {}
         all_pred = {
             **{k + "0": v for k, v in pred0.items()},
             **{k + "1": v for k, v in pred1.items()},
@@ -46,12 +47,12 @@ class TripletPipeline(TwoViewPipeline):
         }
 
         if self.conf.enumerate_pairs:
+            pred = {}
             for idx in ["0to1", "0to2", "1to2"]:
                 pred[idx] = get_twoview(all_pred, idx)
+            return pred
         else:
-            pred = all_pred
-        
-        return pred
+            return all_pred
 
     def _pre_loss_callback(self, seed, epoch):
         super()._pre_loss_callback(seed, epoch)
@@ -64,7 +65,8 @@ class TripletPipeline(TwoViewPipeline):
 
     def loss(self, pred, data):
         if not has_triplet(data):
-            return super().loss(pred, data)
+            raise RuntimeError("No triplets found.")
+            # return super().loss(pred, data)1
 
         losses = {}
         metrics = {}
