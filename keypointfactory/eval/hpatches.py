@@ -5,6 +5,7 @@ from typing import Iterable
 
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import pandas as pd
 import torch
 from omegaconf import OmegaConf
@@ -19,6 +20,77 @@ from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_pair_homography, eval_homography_robust
 from ..utils.tools import AUCMetric
+
+COL_TO_LABELS = {
+    "num_covisible_correct": ("Number of correct covisible points", "NCC Ratio"),
+    "localization_score": ("Sum of localization scores", "Localization Score"),
+    "repeatability": ("Repeatability", "Repeatability"),
+    "H_error_auc": ("Homography Error AUC", "Homography Error (AUC)"),
+}
+
+def plot_scene_summary(summaries, column):
+    fig, axes = plt.subplots(2, 1, figsize=(16, 14), sharey=True)
+
+    illum = summaries[summaries["scene"].map(lambda x: x.startswith("i"))]
+    view = summaries[summaries["scene"].map(lambda x: x.startswith("v"))]
+    
+    sns.lineplot(
+        data=illum,
+        x="scene",
+        y=column,
+        markers=True,
+        dashes=False,
+        ax=axes[0],
+        label="per scene (viewpoint)"
+    )
+    sns.lineplot(
+        data=view,
+        x="scene",
+        y=column,
+        markers=True,
+        dashes=False,
+        ax=axes[1],
+        label="per scene (illumination)"
+    )
+
+    axes[0].axhline(
+        y=illum.mean(axis=0, numeric_only=True)[column],
+        label="illumination mean"
+    )
+    axes[0].axhline(
+        y=summaries.mean(axis=0, numeric_only=True)[column],
+        color='black',
+        label='global mean'
+    )
+    axes[1].axhline(
+        y=view.mean(axis=0, numeric_only=True)[column],
+        label="viewpoint mean"
+    )
+    axes[1].axhline(
+        y=summaries.mean(axis=0, numeric_only=True)[column],
+        color='black',
+        label='global mean'
+    )
+
+    axes[0].legend()
+    axes[1].legend()
+    
+    axes[0].set_title(f"{COL_TO_LABELS[column][0]} per scene (illumination)")
+    axes[0].set_xlabel("Scenes")
+    axes[0].set_ylabel(COL_TO_LABELS[column][1])
+    
+    axes[1].set_title(f"{COL_TO_LABELS[column][0]} per scene (viewpoint)")
+    axes[1].set_xlabel("Scenes")
+    axes[1].set_ylabel(COL_TO_LABELS[column][1])
+    
+    for ax in axes:
+        for label in ax.get_xticklabels():
+            label.set_rotation(60)
+            label.set_ha("right")
+    
+    fig.tight_layout()
+
+    return fig
 
 
 def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):
@@ -96,8 +168,6 @@ class HPatchesPipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
-        "descriptors0",
-        "descriptors1",
     ]
 
     def _init(self, conf):
@@ -109,11 +179,11 @@ class HPatchesPipeline(EvalPipeline):
         dataset = get_dataset("hpatches")(data_conf)
         return dataset.get_data_loader("test")
 
-    def get_predictions(self, experiment_dir, model=None, overwrite=False):
+    def get_predictions(self, experiment_dir, model=None, overwrite=False, get_last=False):
         pred_file = experiment_dir / "predictions.h5"
         if not pred_file.exists() or overwrite:
             if model is None:
-                model = load_model(self.conf.model, self.conf.checkpoint)
+                model = load_model(self.conf.model, self.conf.checkpoint, get_last=get_last)
             export_predictions(
                 self.get_dataloader(self.conf.data),
                 model,
@@ -198,9 +268,8 @@ class HPatchesPipeline(EvalPipeline):
             auc = AUCMetric(list(range(1, 11)), df)
             return auc.compute()
 
-        groupby_columns = ["top_k", "top_by"]
-        if self.conf.eval.summarize_by_scene:
-            groupby_columns.append("scene")
+        groupby_columns = ["top_k", "top_by", "scene"]
+        
         agg_funcs = {
             "num_keypoints": ("num_keypoints", "sum"),
             "num_covisible": ("num_covisible", "sum"),
@@ -225,7 +294,23 @@ class HPatchesPipeline(EvalPipeline):
             .reset_index()
         )
 
-        return summaries, {}, results
+        figures = {}
+        if "num_covisible_correct" in summaries.columns:
+            figures["ncc_ratio"] = plot_scene_summary(summaries, "num_covisible_correct")
+
+        if "localization_score" in summaries.columns:
+            figures["loc_scores"] = plot_scene_summary(summaries, "localization_score")
+
+        if "repeatability" in summaries.columns:
+            figures["repeatability"] = plot_scene_summary(summaries, "repeatability")
+
+        if "H_error_auc" in summaries.columns:
+            figures["H_error_auc"] = plot_scene_summary(summaries, "H_error_auc")
+
+        if not self.conf.eval.summarize_by_scene:
+            summaries = summaries.mean(axis=0, numeric_only=True).reset_index()
+        
+        return summaries, figures, results
 
 
 if __name__ == "__main__":
@@ -251,7 +336,7 @@ if __name__ == "__main__":
 
     pipeline = HPatchesPipeline(conf)
     s, f, r = pipeline.run(
-        experiment_dir, overwrite=args.overwrite, overwrite_eval=args.overwrite_eval
+        experiment_dir, overwrite=args.overwrite, overwrite_eval=args.overwrite_eval, get_last=args.get_last
     )
 
     # print results

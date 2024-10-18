@@ -41,7 +41,7 @@ class EvalPipeline:
         """Returns a data loader with samples for each eval datapoint"""
         raise NotImplementedError
 
-    def get_predictions(self, experiment_dir, model=None, overwrite=False):
+    def get_predictions(self, experiment_dir, model=None, overwrite=False, get_last=False):
         """Export a prediction file for each eval datapoint"""
         raise NotImplementedError
 
@@ -49,13 +49,13 @@ class EvalPipeline:
         """Run the eval on cached predictions"""
         raise NotImplementedError
 
-    def run(self, experiment_dir, model=None, overwrite=False, overwrite_eval=False):
+    def run(self, experiment_dir, model=None, overwrite=False, overwrite_eval=False, get_last=False):
         """Run export+eval loop"""
         self.save_conf(
             experiment_dir, overwrite=overwrite, overwrite_eval=overwrite_eval
         )
         pred_file = self.get_predictions(
-            experiment_dir, model=model, overwrite=overwrite
+            experiment_dir, model=model, overwrite=overwrite, get_last=get_last
         )
 
         f = {}
