@@ -554,8 +554,7 @@ class DISK(BaseModel):
 
         return keypoints, scores
 
-    def _forward(self, data):
-        images = data["image"]
+    def get_heatmap(self, images):
         if self.conf.pad_if_not_divisible:
             h, w = images.shape[2:]
             pd_h = 16 - h % 16 if h % 16 > 0 else 0
@@ -563,6 +562,13 @@ class DISK(BaseModel):
             images = torch.nn.functional.pad(images, (0, pd_w, 0, pd_h), value=0.0)
 
         heatmap = self.unet(images)
+
+        return heatmap
+
+    def _forward(self, data):
+        images = data["image"]
+
+        heatmap = self.get_heatmap(images)
 
         if self.training:
             # Use sampling during training

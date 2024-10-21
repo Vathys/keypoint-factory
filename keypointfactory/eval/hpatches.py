@@ -96,8 +96,6 @@ class HPatchesPipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
-        "descriptors0",
-        "descriptors1",
     ]
 
     def _init(self, conf):
