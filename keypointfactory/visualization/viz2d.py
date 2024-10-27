@@ -138,7 +138,7 @@ def plot_image_grid(
         return axs
 
 
-def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0):
+def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0, pickable=True):
     """Plot keypoints for existing images.
     Args:
         kpts: list of ndarrays of size (N, 2).
@@ -152,7 +152,16 @@ def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0):
     if axes is None:
         axes = plt.gcf().axes
     for ax, k, c, alpha in zip(axes, kpts, colors, a):
-        ax.scatter(k[:, 0], k[:, 1], c=c, s=ps, linewidths=0, alpha=alpha)
+        ax.scatter(
+            k[:, 0],
+            k[:, 1],
+            c=c,
+            s=ps,
+            linewidths=0,
+            alpha=alpha,
+            picker=True,
+            pickradius=5,
+        )
 
 
 def plot_matches(kpts0, kpts1, color=None, lw=1.5, ps=4, a=1.0, labels=None, axes=None):
@@ -266,6 +275,7 @@ def draw_epipolar_line(
         _, w = axis.get_xlim()
         h, _ = axis.get_ylim()
         imshape = (h + 0.5, w + 0.5)
+
     # Intersect line with lines representing image borders.
     X1 = np.cross(line, [1, 0, -1])
     X1 = X1[:2] / X1[2]

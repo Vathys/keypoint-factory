@@ -22,7 +22,6 @@ from ..utils.misc import (
 )
 from ... import logger
 
-
 # def point_distribution(logits, budget): # budget only included for faster testing
 #     proposal_dist = torch.distributions.Categorical(logits=logits)
 #     proposals = proposal_dist.sample()

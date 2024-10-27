@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -126,31 +127,31 @@ class ConsistentMatchDistribution:
 
         return self._dense_logp
 
-    # def _select_cycle_consistent(self, left, right):
-    #     indexes = torch.arange(left.shape[0], device=left.device)
-    #     cycle_consistent = right[left] == indexes
+    def _select_cycle_consistent(self, left, right):
+        indexes = torch.arange(left.shape[0], device=left.device)
+        cycle_consistent = right[left] == indexes
 
-    #     paired_left = left[cycle_consistent]
+        paired_left = left[cycle_consistent]
 
-    #     return torch.stack(
-    #         [
-    #             right[paired_left],
-    #             paired_left,
-    #         ],
-    #         dim=0,
-    #     )
+        return torch.stack(
+            [
+                right[paired_left],
+                paired_left,
+            ],
+            dim=0,
+        )
 
-    # def sample(self):
-    #     samples_I = self._cat_I.sample()
-    #     samples_T = self._cat_T.sample()
+    def sample(self):
+        samples_I = self._cat_I.sample()
+        samples_T = self._cat_T.sample()
 
-    #     return self._select_cycle_consistent(samples_I, samples_T)
+        return self._select_cycle_consistent(samples_I, samples_T)
 
-    # def mle(self):
-    #     maxes_I = self._cat_I.logits.argmax(dim=1)
-    #     maxes_T = self._cat_T.logits.argmax(dim=1)
+    def mle(self):
+        maxes_I = self._cat_I.logits.argmax(dim=1)
+        maxes_T = self._cat_T.logits.argmax(dim=1)
 
-    #     return self._select_cycle_consistent(maxes_I, maxes_T)
+        return self._select_cycle_consistent(maxes_I, maxes_T)
 
 
 class ConsistentMatcher(torch.nn.Module):
@@ -433,8 +434,18 @@ class DISK(BaseModel):
     def _init(self, conf):
         self.set_initialized()
 
-        self.conf.arch["down"] = [16, 32, 64, 64, 64]
-        self.conf.arch["up"] = [64, 64, 64, self.conf.desc_dim + 1]
+        self.conf = OmegaConf.merge(
+            self.conf,
+            OmegaConf.create(
+                {
+                    "arch": {
+                        "down": self.conf.down,
+                        "up": OmegaConf.to_container(self.conf.up)
+                        + [self.conf.desc_dim + 1],
+                    }
+                }
+            ),
+        )
 
         self.unet = Unet(
             in_features=3,

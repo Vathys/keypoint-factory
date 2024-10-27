@@ -1,33 +1,34 @@
-import matplotlib.pyplot as plt
+import pprint
+
 import numpy as np
 
 from .local_frame import LocalFrame
 from . import viz2d
 from .tools import FormatPrinter
-from ..geometry.homography import warp_points
 
-
-class TwoViewFrame(LocalFrame):
+class TripletFrame(LocalFrame):
     default_conf = {
         "default": "keypoints",
         "summary_visible": False,
     }
 
     def _init_frame(self):
-        """initialize frame"""
-        view0, view1 = self.data["view0"], self.data["view1"]
+        view0, view1, view2 = self.data["view0"], self.data["view1"], self.data["view2"]
         if self.plot == "color" or self.plot == "color+depth":
             imgs = [
                 view0["image"][0].permute(1, 2, 0),
                 view1["image"][0].permute(1, 2, 0),
+                view2["image"][0].permute(1, 2, 0),
             ]
         elif self.plot == "depth":
-            imgs = [view0["depth"][0], view1["depth"][0]]
+            imgs = [view0["depth"][0], view1["depth"][0], view2["depth"][0]]
         else:
             raise ValueError(self.plot)
-        imgs = [imgs for _ in self.names]  # repeat for each model
+
+        imgs = [imgs for _ in self.names]
 
         fig, axes = viz2d.plot_image_grid(imgs, return_fig=True, titles=None, figs=5)
+
         [viz2d.add_text(0, n, axes=axes[i]) for i, n in enumerate(self.names)]
 
         if (
@@ -41,6 +42,7 @@ class TwoViewFrame(LocalFrame):
                 for i, _ in enumerate(hmaps)
             ]
 
+        
         if self.summaries is not None:
             formatter = FormatPrinter({np.float32: "%.4f", np.float64: "%.4f"})
             toggle_artists = [
@@ -57,5 +59,5 @@ class TwoViewFrame(LocalFrame):
             ]
         else:
             toggle_artists = []
-
+        
         return fig, axes, toggle_artists

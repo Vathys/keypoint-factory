@@ -1,14 +1,16 @@
 import inspect
 import sys
 import warnings
+import pprint
 
 import matplotlib.pyplot as plt
+from matplotlib.collections import PathCollection
 import torch
 from matplotlib.backend_tools import ToolToggleBase
 from matplotlib.widgets import RadioButtons, Slider
 
 from ..geometry.epipolar import T_to_F, generalized_epi_dist
-from ..geometry.homography import sym_homography_error
+from ..geometry.homography import sym_homography_error, warp_points_torch
 from ..visualization.viz2d import (
     cm_ranking,
     cm_RdGn,
@@ -99,6 +101,17 @@ class ToggleTool(ToolToggleBase):
         self.callback_fn(False)
 
 
+class FormatPrinter(pprint.PrettyPrinter):
+    def __init__(self, formats):
+        super(FormatPrinter, self).__init__()
+        self.formats = formats
+
+    def format(self, obj, ctx, maxlvl, lvl):
+        if type(obj) in self.formats:
+            return self.formats[type(obj)] % obj, 1, 0
+        return pprint.PrettyPrinter.format(self, obj, ctx, maxlvl, lvl)
+
+
 def add_whitespace_left(fig, factor):
     w, h = fig.get_size_inches()
     left = fig.subplotpars.left
@@ -121,7 +134,95 @@ class KeypointPlot:
     def __init__(self, fig, axes, data, preds):
         for i, name in enumerate(preds):
             pred = preds[name]
-            plot_keypoints([pred["keypoints0"][0], pred["keypoints1"][0]], axes=axes[i])
+            kpts = [pred["keypoints0"][0], pred["keypoints1"][0]]
+            if "keypoints2" in pred and len(axes[i]) > 2:
+                kpts.append(pred["keypoints2"][0])
+            plot_keypoints(kpts, axes=axes[i])
+
+
+class InteractiveHomographyKeypointPlot:
+    plot_name = "interactive_homography_keypoints"
+    required_keys = ["keypoints0", "keypoints1", "H_0to1"]
+
+    def __init__(self, fig, axes, data, preds):
+        self.fig = fig
+        self.axes = axes
+        self.data = data
+        self.preds = preds
+        for i, name in enumerate(preds):
+            pred = preds[name]
+            kpts = [pred["keypoints0"][0], pred["keypoints1"][0]]
+            if "keypoints2" in pred and len(axes[i]) > 2:
+                kpts.append(pred["keypoints2"][0])
+            plot_keypoints(kpts, axes=axes[i], pickable=True)
+
+    def click_artist(self, event):
+        art = event.artist
+        if isinstance(art, PathCollection):
+            for i in range(len(self.axes)):
+                if art.axes in self.axes[i]:
+                    break
+            axes_index = self.axes[i].tolist().index(event.artist.axes)
+            ind = event.ind
+            xy = self.preds[list(self.preds.keys())[i]][f"keypoints{axes_index}"][0][
+                ind, :
+            ]
+            xy_r = warp_points_torch(
+                xy,
+                self.data["H_0to1"][0],
+                inverse=(False if axes_index == 0 else True),
+            )
+            image_width, image_height = self.data[f"view{axes_index}"]["image_size"][0]
+            xy_r = xy_r[
+                (xy_r[:, 0] >= 0 & (xy_r[:, 0] < image_width))
+                & (xy_r[:, 1] >= 0 & (xy_r[:, 1] < image_height))
+            ]
+            plot_keypoints(
+                [xy_r], axes=[self.axes[i][(axes_index + 1) % 2]], colors="red"
+            )
+
+
+class InteractiveEpipolarKeypointPlot:
+    plot_name = "interactive_epipolar_keypoints"
+    required_keys = ["keypoints0", "keypoints1", "T_0to1", "view0", "view1"]
+
+    def __init__(self, fig, axes, data, preds):
+        self.fig = fig
+        self.axes = axes
+        self.data = data
+        self.preds = preds
+        for i, name in enumerate(preds):
+            pred = preds[name]
+            kpts = [pred["keypoints0"][0], pred["keypoints1"][0]]
+            if "keypoints2" in pred and len(axes[i]) > 2:
+                kpts.append(pred["keypoints2"][0])
+            plot_keypoints(kpts, axes=axes[i], pickable=True)
+
+        self.F = T_to_F(
+            data["view0"]["camera"][0], data["view1"]["camera"][0], data["T_0to1"][0]
+        )
+
+    def click_artist(self, event):
+        art = event.artist
+        if isinstance(art, PathCollection):
+            for i in range(len(self.axes)):
+                if art.axes in self.axes[i]:
+                    break
+            axes_index = self.axes[i].tolist().index(event.artist.axes)
+            ind = [event.ind[0]]
+            xy = self.preds[list(self.preds.keys())[i]][f"keypoints{axes_index}"][0][
+                ind, :
+            ]
+            for j in range(xy.shape[0]):
+                line = get_line(
+                    self.F if axes_index == 0 else self.F.transpose(0, 1), xy[j, :]
+                )[:, 0]
+                draw_epipolar_line(
+                    line,
+                    self.axes[i][(axes_index + 1) % 2],
+                    self.data[f"view{(axes_index + 1) % 2}"]["image_size"][0].flip(dims=(0,)).numpy(),
+                    color="red",
+                )
 
 
 class LinePlot:
