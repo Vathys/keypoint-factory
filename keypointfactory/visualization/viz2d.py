@@ -123,7 +123,8 @@ def plot_image_grid(
     for j in range(nr):
         for i in range(n):
             ax = axs[j][i]
-            ax.imshow(imgs[j][i], cmap=plt.get_cmap(cmaps[i]))
+            img = ax.imshow(imgs[j][i], cmap=plt.get_cmap(cmaps[i]), picker=True)
+            img.axes_image_index = (j, i)
             ax.set_axis_off()
             if set_lim:
                 ax.set_xlim([0, imgs[j][i].shape[1]])
@@ -159,7 +160,7 @@ def plot_keypoints(kpts, colors="lime", ps=4, axes=None, a=1.0, pickable=True):
             s=ps,
             linewidths=0,
             alpha=alpha,
-            picker=True,
+            picker=pickable,
             pickradius=5,
         )
 
@@ -267,7 +268,14 @@ def add_text(
 
 
 def draw_epipolar_line(
-    line, axis, imshape=None, color="b", label=None, alpha=1.0, visible=True
+    line,
+    axis,
+    imshape=None,
+    color="b",
+    label=None,
+    alpha=1.0,
+    visible=True,
+    pickable=True,
 ):
     if imshape is not None:
         h, w = imshape[:2]
@@ -307,6 +315,7 @@ def draw_epipolar_line(
             label=label,
             alpha=alpha,
             visible=visible,
+            picker=pickable,
         )[0]
         return art
     else:
