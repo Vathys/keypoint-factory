@@ -42,7 +42,7 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
         "subset": None,
         "ignore_large_images": True,
         "grayscale": False,
-        "triplets": False,
+        "triplet": False,
     }
 
     # Large images that were ignored in previous papers
@@ -75,7 +75,7 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
                 continue
             if conf.subset is not None and conf.subset != seq[0]:
                 continue
-            if self.conf.triplets:
+            if self.conf.triplet:
                 self.items.extend([(seq, i, j, seq[0] == "i") for i, j in combinations(list(range(2, 7)), 2)])
             else:
                 self.items.extend([(seq, i, seq[0] == "i") for i in range(2, 7)])
@@ -101,7 +101,7 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
         return self.preprocessor(img)
 
     def __getitem__(self, idx):
-        if self.conf.triplets:
+        if self.conf.triplet:
             seq, q1_idx, q2_idx, is_illu = self.items[idx]
             data0 = self._read_image(seq, 1)
             data1 = self._read_image(seq, q1_idx)
