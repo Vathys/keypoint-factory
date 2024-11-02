@@ -9,6 +9,7 @@ from ...geometry.epipolar import (
     relative_pose_error,
 )
 from ...geometry.homography import warp_points_torch, homography_corner_error
+from ...geometry.depth import simple_project, unproject
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
@@ -32,42 +33,6 @@ def point_distribution(logits):
     logp = proposal_logp + accept_logp
 
     return proposals, accept_mask, logp
-
-
-def unproject(kpts, depth, cam, pose):
-    batch, h, w = depth.shape
-    in_range = (
-        (0 <= kpts[:, :, 0])
-        & (kpts[:, :, 0] < w)
-        & (0 <= kpts[:, :, 1])
-        & (kpts[:, :, 1] < h)
-    )
-    finite = torch.isfinite(kpts).all(dim=2)
-    valid_depth = in_range & finite
-
-    valid_kpts = []
-    for b in range(batch):
-        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
-    fdepth = torch.full(
-        kpts.shape[:2],
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
-    )
-
-    for b in range(batch):
-        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
-
-    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
-    kptsw = pose.inv().transform(kptsc)
-
-    return kptsw
-
-
-def project(kptsw, cam, pose):
-    ext = pose.transform(kptsw)
-    kpts, _ = cam.cam2image(ext)
-    return kpts
 
 
 def reproject_homography(kpts, H, h, w, inverse):
@@ -238,8 +203,8 @@ class CycleMatcher:
         T0 = data["view0"]["T_w2cam"]
         T1 = data["view1"]["T_w2cam"]
 
-        kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-        kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+        kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+        kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -366,8 +331,8 @@ def classify_by_depth(data, pred, threshold=2.0):
     T0 = data["view0"]["T_w2cam"]
     T1 = data["view1"]["T_w2cam"]
 
-    kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-    kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+    kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+    kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -409,6 +374,8 @@ class DISK(BaseModel):
         "reward": "depth",
         "arch": {
             "kernel_size": 5,
+            "down": [16, 32, 64, 64, 64],
+            "up": [64, 64, 64],
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
             "upsample": "TrivialUpsample",
@@ -439,8 +406,8 @@ class DISK(BaseModel):
             OmegaConf.create(
                 {
                     "arch": {
-                        "down": self.conf.down,
-                        "up": OmegaConf.to_container(self.conf.up)
+                        "down": self.conf.arch.down,
+                        "up": OmegaConf.to_container(self.conf.arch.up)
                         + [self.conf.desc_dim + 1],
                     }
                 }

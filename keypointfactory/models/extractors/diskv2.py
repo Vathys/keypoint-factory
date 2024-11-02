@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import torch
-from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -9,6 +8,7 @@ from ...geometry.epipolar import (
     relative_pose_error,
 )
 from ...geometry.homography import warp_points_torch, homography_corner_error
+from ...geometry.depth import unproject, simple_project
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
@@ -26,16 +26,16 @@ from ... import logger
 #     proposal_dist = torch.distributions.Categorical(logits=logits)
 #     proposals = proposal_dist.sample()
 #     proposal_logp = proposal_dist.log_prob(proposals)
-# 
+#
 #     accept_logits = select_on_last(logits, proposals).squeeze(-1)
-# 
+#
 #     accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
 #     accept_samples = accept_dist.sample()
 #     accept_logp = accept_dist.log_prob(accept_samples)
 #     accept_mask = accept_samples == 1
-# 
+#
 #     logp = proposal_logp + accept_logp
-# 
+#
 #     return proposals, accept_mask, logp
 
 
@@ -49,9 +49,11 @@ def point_distribution(logits, budget):
     b, tiled_h, tiled_w = accept_logits.shape
 
     flat_logits = accept_logits.reshape(b, -1)
-    
+
     gumbel_dist = torch.distributions.Gumbel(0, 1)
-    gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(logits.device)
+    gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(
+        logits.device
+    )
     topk_indices = torch.topk(gumbel_scores, budget, dim=-1).indices
 
     accept_samples = torch.zeros_like(flat_logits)
@@ -63,44 +65,8 @@ def point_distribution(logits, budget):
     accept_logp = torch.log_softmax(accept_logits, dim=-1)
     accept_logp = accept_logp.reshape(b, tiled_h, tiled_w)
     logp = proposal_logp + accept_logp
-    
+
     return proposals, accept_mask, logp
-
-
-def unproject(kpts, depth, cam, pose):
-    batch, h, w = depth.shape
-    in_range = (
-        (0 <= kpts[:, :, 0])
-        & (kpts[:, :, 0] < w)
-        & (0 <= kpts[:, :, 1])
-        & (kpts[:, :, 1] < h)
-    )
-    finite = torch.isfinite(kpts).all(dim=2)
-    valid_depth = in_range & finite
-
-    valid_kpts = []
-    for b in range(batch):
-        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
-    fdepth = torch.full(
-        kpts.shape[:2],
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
-    )
-
-    for b in range(batch):
-        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
-
-    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
-    kptsw = pose.inv().transform(kptsc)
-
-    return kptsw
-
-
-def project(kptsw, cam, pose):
-    ext = pose.transform(kptsw)
-    kpts, _ = cam.cam2image(ext)
-    return kpts
 
 
 def reproject_homography(kpts, H, h, w, inverse):
@@ -194,8 +160,8 @@ class CycleMatcher:
         T0 = data["view0"]["T_w2cam"]
         T1 = data["view1"]["T_w2cam"]
 
-        kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-        kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+        kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+        kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -271,52 +237,6 @@ class CycleMatcher:
         return matches.transpose(1, 2)
 
 
-class Unet(torch.nn.Module):
-    def __init__(self, in_features, conf):
-        super(Unet, self).__init__()
-
-        self.up = [int(u) for u in conf.arch.up]
-        self.down = [int(d) for d in conf.arch.down]
-        self.in_features = in_features
-
-        size = conf.arch.kernel_size
-
-        down_block = get_module(conf.arch.down_block)
-        up_block = get_module(conf.arch.up_block)
-
-        down_dims = [in_features] + self.down
-        self.path_down = torch.nn.ModuleList()
-        for i, (d_in, d_out) in enumerate(zip(down_dims[:-1], down_dims[1:])):
-            block = down_block(
-                d_in, d_out, size=size, name=f"down_{i}", is_first=i == 0, conf=conf
-            )
-            self.path_down.append(block)
-
-        bottom_dims = [self.down[-1]] + self.up
-        horizontal_dims = down_dims[-2::-1]
-        self.path_up = torch.nn.ModuleList()
-        for i, (d_bot, d_hor, d_out) in enumerate(
-            zip(bottom_dims, horizontal_dims, self.up)
-        ):
-            block = up_block(d_bot, d_hor, d_out, size=size, name=f"up_{i}", conf=conf)
-            self.path_up.append(block)
-
-        self.n_params = 0
-        for params in self.parameters():
-            self.n_params += params.numel()
-
-    def forward(self, input):
-        features = [input]
-        for block in self.path_down:
-            features.append(block(features[-1]))
-
-        f_bot = features[-1]
-        features_horizontal = features[-2::-1]
-        for layer, f_hor in zip(self.path_up, features_horizontal):
-            f_bot = layer(f_bot, f_hor)
-
-        return f_bot
-
 def classify_by_homography(data, pred, threshold=2.0):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
@@ -368,8 +288,8 @@ def classify_by_depth(data, pred, threshold=2.0):
     T0 = data["view0"]["T_w2cam"]
     T1 = data["view1"]["T_w2cam"]
 
-    kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-    kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+    kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+    kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -522,7 +442,9 @@ class DISK(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(tiled, self.conf.sample_budget)
+        proposals, accept_mask, logp = point_distribution(
+            tiled, self.conf.sample_budget
+        )
 
         cgrid = torch.stack(
             torch.meshgrid(
