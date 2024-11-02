@@ -1,56 +1,60 @@
 [project]
-name = "keypointfactory"
-description = "Training and evaluation of local keypoint detectors and descriptors."
-version = "0.1.0"
 authors = [
-    {name = "Deep Desai"},
-    {name = "Philipp Lindenberger"},
-    {name = "Paul-Edouard Sarlin"},
-    {name = "Rémi Pautrat"},
-    {name = "Iago Suárez"},
+    { name = "Deep Desai" },
+    { name = "Iago Suárez" },
+    { name = "Paul-Edouard Sarlin" },
+    { name = "Philipp Lindenberger" },
+    { name = "Rémi Pautrat" },
 ]
-readme = "README.md"
-requires-python = ">=3.6"
-license = {file = "LICENSE"}
 classifiers = [
-    "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
 ]
 dependencies = [
+    "albumentations",
+    "h5py",
+    "joblib",
+    "kornia",
+    "matplotlib",
+    "numpy",
+    "omegaconf",
+    "opencv-python",
+    "pydegensac",
+    "scipy",
+    "seaborn",
+    "tables",
+    "tensorboard",
     "torch>=1.7",
     "torchvision>=0.8",
-    "numpy",
-    "opencv-python",
     "tqdm",
-    "matplotlib",
-    "scipy",
-    "h5py",
-    "omegaconf",
-    "tensorboard",
-    "albumentations",
-    "kornia",
-    "seaborn",
-    "joblib",
-    "tables",
-    "pydegensac",
 ]
-urls = {Repository = "https://github.com/Vathys/keypoint-factory"}
+description = "Training and evaluation of local keypoint detectors and descriptors."
+license = { file = "LICENSE" }
+name = "keypointfactory"
+readme = "README.md"
+requires-python = ">=3.6"
+urls = { Repository = "https://github.com/Vathys/keypoint-factory" }
+version = "0.1.0"
 
 [project.optional-dependencies]
-extra = [
-    "pycolmap",
-    "poselib @ git+https://github.com/PoseLib/PoseLib.git@9c8f3ca1baba69e19726cc7caded574873ec1f9e",
-    "homography_est @ git+https://github.com/rpautrat/homography_est.git@17b200d528e6aa8ac61a878a29265bf5f9d36c41",
-]
 dev = ["black", "flake8", "isort", "parameterized"]
+extra = [
+    "homography_est @ git+https://github.com/rpautrat/homography_est.git@17b200d528e6aa8ac61a878a29265bf5f9d36c41",
+    "poselib @ git+https://github.com/PoseLib/PoseLib.git@9c8f3ca1baba69e19726cc7caded574873ec1f9e",
+    "pycolmap",
+]
 
 [tool.setuptools.packages.find]
 include = ["keypointfactory*"]
 
 [tool.setuptools.package-data]
-keypointfactory = ["datasets/megadepth_scene_lists/*.txt", "configs/*.yaml"]
+keypointfactory = [
+    "configs/*.yaml",
+    "datasets/megadepth_scene_lists/*.txt",
+    "datasets/tartanair_scene_lists/*.txt",
+]
 
 [tool.isort]
-profile = "black"
 extend_skip = ["keypointfactory_nonfree/"]
+profile = "black"
