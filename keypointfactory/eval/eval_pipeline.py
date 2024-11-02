@@ -10,7 +10,7 @@ def load_eval(dir):
 
 def save_eval(dir, summaries, figures, results):
     results.to_hdf(
-        str(dir / "results.h5"), key="results", mode="w", format="fixed", index="False"
+        str(dir / "results.h5"), key="results", mode="w", format="fixed", index=False
     )
     summaries.to_json(str(dir / "summaries.json"), orient="records", indent=4, mode="w")
     for fig_name, fig in figures.items():

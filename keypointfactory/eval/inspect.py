@@ -1,7 +1,6 @@
 import argparse
 from collections import defaultdict
 from pathlib import Path
-from pprint import pprint
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -43,10 +42,11 @@ if __name__ == "__main__":
         pred_file = experiment_dir / "predictions.h5"
         s, results[name] = load_eval(experiment_dir)
         predictions[name] = pred_file
-        for k, v in s.items():
-            summaries[k][name] = v
+        summaries[name] = s
 
-    pprint(summaries)
+    for name, s in summaries.items():
+        print(name)
+        print(s.head(10))
 
     plt.close("all")
 

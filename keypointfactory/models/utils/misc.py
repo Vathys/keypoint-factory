@@ -7,6 +7,7 @@ from ...geometry.homography import warp_points_torch
 
 
 def lscore(dist, thres, type="linear", rescale=True):
+def lscore(dist, thres, type="linear", rescale=True):
     score = None
     if type == "correct":
         score = torch.where(
@@ -40,6 +41,7 @@ def lscore(dist, thres, type="linear", rescale=True):
                 score_[b][score_[b] < 0] = score_[b][score_[b] < 0] / score_[b][score_[b] < 0].abs().max()
             if (score_[b] > 0).sum() > 0:
                 score_[b][score_[b] > 0] = score_[b][score_[b] > 0] / score_[b][score_[b] > 0].abs().max()
+        score_ = torch.where(torch.isnan(score_), -1, score_)
         return score_
     else:
         return score

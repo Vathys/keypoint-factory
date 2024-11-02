@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import torch
-from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -9,6 +8,7 @@ from ...geometry.epipolar import (
     relative_pose_error,
 )
 from ...geometry.homography import warp_points_torch, homography_corner_error
+from ...geometry.depth import unproject, simple_project
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
@@ -37,9 +37,11 @@ def point_distribution(logits, budget):
     b, tiled_h, tiled_w = accept_logits.shape
 
     flat_logits = accept_logits.reshape(b, -1)
-    
+
     gumbel_dist = torch.distributions.Gumbel(0, 1)
-    gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(logits.device)
+    gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(
+        logits.device
+    )
     topk_indices = torch.topk(gumbel_scores, budget, dim=-1).indices
 
     accept_samples = torch.zeros_like(flat_logits)
@@ -51,44 +53,8 @@ def point_distribution(logits, budget):
     accept_logp = torch.log_softmax(accept_logits, dim=-1)
     accept_logp = accept_logp.reshape(b, tiled_h, tiled_w)
     logp = proposal_logp + accept_logp
-    
+
     return proposals, accept_mask, logp
-
-
-def unproject(kpts, depth, cam, pose):
-    batch, h, w = depth.shape
-    in_range = (
-        (0 <= kpts[:, :, 0])
-        & (kpts[:, :, 0] < w)
-        & (0 <= kpts[:, :, 1])
-        & (kpts[:, :, 1] < h)
-    )
-    finite = torch.isfinite(kpts).all(dim=2)
-    valid_depth = in_range & finite
-
-    valid_kpts = []
-    for b in range(batch):
-        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
-    fdepth = torch.full(
-        kpts.shape[:2],
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
-    )
-
-    for b in range(batch):
-        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
-
-    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
-    kptsw = pose.inv().transform(kptsc)
-
-    return kptsw
-
-
-def project(kptsw, cam, pose):
-    ext = pose.transform(kptsw)
-    kpts, _ = cam.cam2image(ext)
-    return kpts
 
 
 def reproject_homography(kpts, H, h, w, inverse):
@@ -162,8 +128,8 @@ def classify_by_depth(data, pred, threshold=2.0):
     T0 = data["view0"]["T_w2cam"]
     T1 = data["view1"]["T_w2cam"]
 
-    kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-    kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+    kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+    kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -359,7 +325,9 @@ class DISK(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(tiled, self.conf.sample_budget)
+        proposals, accept_mask, logp = point_distribution(
+            tiled, self.conf.sample_budget
+        )
 
         cgrid = torch.stack(
             torch.meshgrid(

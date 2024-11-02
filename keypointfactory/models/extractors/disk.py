@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
+from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,
@@ -9,6 +10,7 @@ from ...geometry.epipolar import (
     relative_pose_error,
 )
 from ...geometry.homography import warp_points_torch, homography_corner_error
+from ...geometry.depth import simple_project, unproject
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
@@ -32,42 +34,6 @@ def point_distribution(logits):
     logp = proposal_logp + accept_logp
 
     return proposals, accept_mask, logp
-
-
-def unproject(kpts, depth, cam, pose):
-    batch, h, w = depth.shape
-    in_range = (
-        (0 <= kpts[:, :, 0])
-        & (kpts[:, :, 0] < w)
-        & (0 <= kpts[:, :, 1])
-        & (kpts[:, :, 1] < h)
-    )
-    finite = torch.isfinite(kpts).all(dim=2)
-    valid_depth = in_range & finite
-
-    valid_kpts = []
-    for b in range(batch):
-        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
-    fdepth = torch.full(
-        kpts.shape[:2],
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
-    )
-
-    for b in range(batch):
-        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
-
-    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
-    kptsw = pose.inv().transform(kptsc)
-
-    return kptsw
-
-
-def project(kptsw, cam, pose):
-    ext = pose.transform(kptsw)
-    kpts, _ = cam.cam2image(ext)
-    return kpts
 
 
 def reproject_homography(kpts, H, h, w, inverse):
@@ -127,31 +93,31 @@ class ConsistentMatchDistribution:
 
         return self._dense_logp
 
-    # def _select_cycle_consistent(self, left, right):
-    #     indexes = torch.arange(left.shape[0], device=left.device)
-    #     cycle_consistent = right[left] == indexes
+    def _select_cycle_consistent(self, left, right):
+        indexes = torch.arange(left.shape[0], device=left.device)
+        cycle_consistent = right[left] == indexes
 
-    #     paired_left = left[cycle_consistent]
+        paired_left = left[cycle_consistent]
 
-    #     return torch.stack(
-    #         [
-    #             right[paired_left],
-    #             paired_left,
-    #         ],
-    #         dim=0,
-    #     )
+        return torch.stack(
+            [
+                right[paired_left],
+                paired_left,
+            ],
+            dim=0,
+        )
 
-    # def sample(self):
-    #     samples_I = self._cat_I.sample()
-    #     samples_T = self._cat_T.sample()
+    def sample(self):
+        samples_I = self._cat_I.sample()
+        samples_T = self._cat_T.sample()
 
-    #     return self._select_cycle_consistent(samples_I, samples_T)
+        return self._select_cycle_consistent(samples_I, samples_T)
 
-    # def mle(self):
-    #     maxes_I = self._cat_I.logits.argmax(dim=1)
-    #     maxes_T = self._cat_T.logits.argmax(dim=1)
+    def mle(self):
+        maxes_I = self._cat_I.logits.argmax(dim=1)
+        maxes_T = self._cat_T.logits.argmax(dim=1)
 
-    #     return self._select_cycle_consistent(maxes_I, maxes_T)
+        return self._select_cycle_consistent(maxes_I, maxes_T)
 
 
 class ConsistentMatcher(torch.nn.Module):
@@ -238,8 +204,8 @@ class CycleMatcher:
         T0 = data["view0"]["T_w2cam"]
         T1 = data["view1"]["T_w2cam"]
 
-        kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-        kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+        kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+        kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -366,8 +332,8 @@ def classify_by_depth(data, pred, threshold=2.0):
     T0 = data["view0"]["T_w2cam"]
     T1 = data["view1"]["T_w2cam"]
 
-    kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-    kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+    kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+    kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -410,6 +376,8 @@ class DISK(BaseModel):
         "arch": {
             "type": "original",
             "kernel_size": 5,
+            "down": [16, 32, 64, 64, 64],
+            "up": [64, 64, 64],
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
             "down": [],
@@ -437,12 +405,18 @@ class DISK(BaseModel):
     def _init(self, conf):
         self.set_initialized()
 
-        if self.conf.arch.type == "original":
-            self.conf = OmegaConf.merge(self.conf, OmegaConf.create({"arch": {"down": [16, 32, 64, 64, 64], "up": [64, 64, 64, self.conf.desc_dim + 1], "down_block": "ThinDownBlock", "up_block": "ThinUpBlock"}}))
-        elif self.conf.arch.type == "two_block":
-            self.conf = OmegaConf.merge(self.conf, OmegaConf.create({"arch": {"down": [16, 32, 64], "up": [64, self.conf.desc_dim + 1], "down_block": "ResDownBlock", "up_block": "ResUpBlock"}}))
-        else:
-            raise RuntimeError(f"Architecture type {self.conf.arch.type} not found. Select from [\"original\", \"two_block\"].")
+        self.conf = OmegaConf.merge(
+            self.conf,
+            OmegaConf.create(
+                {
+                    "arch": {
+                        "down": self.conf.arch.down,
+                        "up": OmegaConf.to_container(self.conf.arch.up)
+                        + [self.conf.desc_dim + 1],
+                    }
+                }
+            ),
+        )
 
         self.unet = Unet(
             in_features=3,
