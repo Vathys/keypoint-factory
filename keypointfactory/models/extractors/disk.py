@@ -2,7 +2,6 @@ from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
-from omegaconf import OmegaConf
 
 from ...geometry.epipolar import (
     T_to_F,

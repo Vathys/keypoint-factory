@@ -14,13 +14,11 @@ from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
 from ..utils.unet import Unet
 from ..utils.misc import (
-    distance_matrix,
     pad_and_stack,
     select_on_last,
     tile,
     lscore,
     CycleMatcher,
-    classify_by_depth,
     classify_by_epipolar,
     classify_by_homography,
 )
@@ -77,68 +75,6 @@ def reproject_homography(kpts, H, h, w, inverse):
 
     return nkpts
 
-def classify_by_homography(data, pred, threshold=2.0):
-    kpts0 = pred["keypoints0"]
-    kpts1 = pred["keypoints1"]
-
-    H_0to1 = data["H_0to1"]
-
-    kpts0_r = reproject_homography(
-        kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
-    )
-    kpts1_r = reproject_homography(
-        kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
-    )
-
-    diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
-    diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
-
-    close0 = torch.norm(diff0, p=2, dim=-1) < threshold
-    close1 = torch.norm(diff1, p=2, dim=-1) < threshold
-
-    return close0 & close1
-
-
-def classify_by_epipolar(data, pred, threshold=2.0):
-    F_0_1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], data["T_0to1"])
-    F_1_0 = T_to_F(data["view1"]["camera"], data["view0"]["camera"], data["T_1to0"])
-
-    kpts0 = pred["keypoints0"]
-    kpts1 = pred["keypoints1"]
-
-    epi_0_1 = asymm_epipolar_distance_all(kpts0, kpts1, F_0_1).abs()
-    epi_1_0 = asymm_epipolar_distance_all(kpts1, kpts0, F_1_0).abs()
-
-    if epi_0_1.dim() == 2:
-        epi_0_1 = epi_0_1.unsqueeze(0)
-    if epi_1_0.dim() == 2:
-        epi_1_0 = epi_1_0.unsqueeze(0)
-
-    return (epi_0_1 < threshold) & (epi_1_0 < threshold).transpose(1, 2)
-
-
-def classify_by_depth(data, pred, threshold=2.0):
-    kpts0 = pred["keypoints0"]  # [B, N, 2]
-    kpts1 = pred["keypoints1"]  # [B, M, 2]
-
-    depth0 = data["view0"]["depth"]
-    depth1 = data["view1"]["depth"]
-    cam0 = data["view0"]["camera"]
-    cam1 = data["view1"]["camera"]
-    T0 = data["view0"]["T_w2cam"]
-    T1 = data["view1"]["T_w2cam"]
-
-    kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-    kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
-
-    diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
-    diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
-
-    close0 = torch.norm(diff0, p=2, dim=-1) < threshold
-    close1 = torch.norm(diff1, p=2, dim=-1) < threshold
-
-    return close0 & close1
-
 
 def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     kpts0 = pred["keypoints0"]
@@ -161,6 +97,7 @@ def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
 
     return score0, score1
 
+
 def depth_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
@@ -174,8 +111,8 @@ def depth_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     T0 = data["view0"]["T_w2cam"]
     T1 = data["view1"]["T_w2cam"]
 
-    kpts0_r = project(unproject(kpts0, depth0, camera0, T0), camera1, T1)
-    kpts1_r = project(unproject(kpts1, depth1, camera1, T1), camera0, T0)
+    kpts0_r = simple_project(unproject(kpts0, depth0, camera0, T0), camera1, T1)
+    kpts1_r = simple_project(unproject(kpts1, depth1, camera1, T1), camera0, T0)
 
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
     diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
@@ -198,6 +135,8 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
+    b, _, _ = kpts0.shape
+
     H_0to1 = data["H_0to1"]
 
     kpts0_r = reproject_homography(
@@ -210,22 +149,39 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
     diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
 
-    dist0 = torch.norm(diff0, p=2, dim=-1)
-    dist1 = torch.norm(diff1, p=2, dim=-1)
+    dist0 = torch.norm(diff0, p=2, dim=-1).nan_to_num(nan=float("inf"))
+    dist1 = torch.norm(diff1, p=2, dim=-1).nan_to_num(nan=float("inf"))
 
-    reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
-    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
+    min0_vals, min0_indices = torch.min(dist0, dim=-1)
+    min1_vals, min1_indices = torch.min(dist1, dim=-1)
 
-    score0 = lscore(reproj_error0, threshold, type=score_type)
-    score1 = lscore(reproj_error1, threshold, type=score_type)
+    mask0 = min1_indices.gather(1, min0_indices) == torch.arange(
+        min0_indices.shape[1], device=min0_indices.device
+    )
+    mask1 = min0_indices.gather(1, min1_indices) == torch.arange(
+        min1_indices.shape[1], device=min1_indices.device
+    )
 
+    score0 = -torch.ones(kpts0.shape[0], kpts0.shape[1], device=kpts0.device)
+    score1 = -torch.ones(kpts1.shape[0], kpts1.shape[1], device=kpts1.device)
+
+    cyclical_reproj_error0 = torch.where(
+        mask0, min0_vals, torch.tensor(float("inf"), device=min0_vals.device)
+    )
+    cyclical_reproj_error1 = torch.where(
+        mask1, min1_vals, torch.tensor(float("inf"), device=min1_vals.device)
+    )
+
+    score0 = lscore(cyclical_reproj_error0, threshold, type=score_type)
+    score1 = lscore(cyclical_reproj_error1, threshold, type=score_type)
+    
     return score0, score1
 
 
 class DISK(BaseModel):
     default_conf = {
         "window_size": 8,
-        "nms_radius": 2,  # matches with disk nms radius of 5
+        "nms_radius": 2,  # matches with disk nms window of 5
         "max_num_keypoints": None,
         "sample_budget": 4096,
         "force_num_keypoints": False,
@@ -238,8 +194,8 @@ class DISK(BaseModel):
             "kernel_size": 5,
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
-            "down": [16, 32, 64, 64, 64],
-            "up": [64, 64, 64, 1],
+            "down": [16, 32, 64, 64],
+            "up": [64, 64, 1],
             "upsample": "TrivialUpsample",
             "downsample": "TrivialDownsample",
             "down_block": "ThinDownBlock",  # second option is DownBlock
@@ -247,7 +203,6 @@ class DISK(BaseModel):
             # "dropout": False, not used yet
             "bias": True,
             "padding": True,
-            "train_invT": False,
         },
         "loss": {
             "score_type": "coarse",
@@ -416,16 +371,18 @@ class DISK(BaseModel):
             if self.conf.pad_edges > 0:
                 image_shape = data["image_size"][i]
                 vis = torch.all(
-                    (point > self.conf.pad_edges) & (point < image_shape - self.conf.pad_edges), dim=-1
+                    (point > self.conf.pad_edges)
+                    & (point < image_shape - self.conf.pad_edges),
+                    dim=-1,
                 )
                 point = point[vis]
                 logp = logp[vis]
-               
+
             x, y = point.T
-            
+
             keypoints.append(point)
             scores.append(logp)
-               
+
         if self.conf.force_num_keypoints:
             # pad to target_length
             target_length = self.conf.max_num_keypoints
@@ -439,7 +396,7 @@ class DISK(BaseModel):
         else:
             keypoints = torch.stack(keypoints, 0)
             scores = torch.stack(scores, 0)
-       
+
         return {
             "keypoints": keypoints.float(),
             "heatmap": heatmap,
