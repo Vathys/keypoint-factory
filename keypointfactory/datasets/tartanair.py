@@ -1,24 +1,21 @@
+import argparse
 import logging
 from collections.abc import Iterable
-import argparse
-
 from pathlib import Path
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import PIL.Image
-from omegaconf import OmegaConf
-from kornia.geometry.conversions import (
-    normalize_quaternion,
-    quaternion_to_rotation_matrix,
-)
 
-from ..settings import DATA_PATH
+import matplotlib.pyplot as plt
+import numpy as np
+import PIL.Image
+import torch
+from kornia.geometry.conversions import quaternion_to_rotation_matrix
+from omegaconf import OmegaConf
+
 from ..geometry.wrappers import Camera, Pose
+from ..models.cache_loader import CacheLoader
+from ..settings import DATA_PATH
 from ..utils.image import ImagePreprocessor, load_image
 from ..utils.tools import fork_rng
-from ..models.cache_loader import CacheLoader
-from ..visualization.viz2d import plot_image_grid, plot_heatmaps
+from ..visualization.viz2d import plot_heatmaps, plot_image_grid
 from .base_dataset import BaseDataset
 from .utils import rotate_intrinsics, rotate_pose_inplane, scale_intrinsics
 

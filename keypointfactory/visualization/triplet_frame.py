@@ -1,10 +1,9 @@
-import pprint
-
 import numpy as np
 
-from .local_frame import LocalFrame
 from . import viz2d
+from .local_frame import LocalFrame
 from .tools import FormatPrinter
+
 
 class TripletFrame(LocalFrame):
     default_conf = {
@@ -42,7 +41,6 @@ class TripletFrame(LocalFrame):
                 for i, _ in enumerate(hmaps)
             ]
 
-        
         if self.summaries is not None:
             formatter = FormatPrinter({np.float32: "%.4f", np.float64: "%.4f"})
             toggle_artists = [
@@ -59,5 +57,5 @@ class TripletFrame(LocalFrame):
             ]
         else:
             toggle_artists = []
-        
+
         return fig, axes, toggle_artists

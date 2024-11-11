@@ -1,5 +1,6 @@
 from .tools import RadioHideTool, ToggleTool, __plot_dict__
 
+
 class LocalFrame:
     default_conf = {
         "default": "keypoints",
@@ -53,10 +54,10 @@ class LocalFrame:
             callback_fn=self.set_summary_visible,
             keymap="t",
         )
-        
+
         if self.fig.canvas.manager.toolbar is not None:
             self.fig.canvas.manager.toolbar.add_tool("switch plot", "navigation")
-        
+
         self.draw(conf.default)
 
     def init_frame(self):
@@ -66,7 +67,7 @@ class LocalFrame:
     def _init_frame(self):
         """initialize frame"""
         raise NotImplementedError
-    
+
     def click_artist(self, event):
         self._click_artist(event)
         if hasattr(self.handle, "click_artist"):
@@ -82,7 +83,7 @@ class LocalFrame:
         self.conf.default = value
         self.handle = self.plot_dict[value](self.fig, self.axes, self.data, self.preds)
         return self.handle
-    
+
     def clear(self):
         if self.handle is not None:
             try:
@@ -107,5 +108,3 @@ class LocalFrame:
         self.conf.points_visible = visible
         self.draw(self.conf.default)
         self.fig.canvas.draw_idle()
-
-    

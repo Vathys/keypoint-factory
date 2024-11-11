@@ -3,9 +3,9 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from ...geometry.homography import warp_points_torch
-from ...geometry.epipolar import asymm_epipolar_distance_all, T_to_F
 from ...geometry.depth import simple_project, unproject
+from ...geometry.epipolar import T_to_F, asymm_epipolar_distance_all
+from ...geometry.homography import warp_points_torch
 
 
 def lscore(dist, thres, type="linear", rescale=True):

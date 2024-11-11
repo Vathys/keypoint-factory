@@ -76,7 +76,12 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
             if conf.subset is not None and conf.subset != seq[0]:
                 continue
             if self.conf.triplet:
-                self.items.extend([(seq, i, j, seq[0] == "i") for i, j in combinations(list(range(2, 7)), 2)])
+                self.items.extend(
+                    [
+                        (seq, i, j, seq[0] == "i")
+                        for i, j in combinations(list(range(2, 7)), 2)
+                    ]
+                )
             else:
                 self.items.extend([(seq, i, seq[0] == "i") for i in range(2, 7)])
         logger.info(f"Loaded {len(self.items)} items.")
@@ -110,7 +115,12 @@ class HPatches(BaseDataset, torch.utils.data.Dataset):
             H_2 = read_homography(self.root / seq / f"H_1_{q2_idx}")
             H_0to1 = data1["transform"] @ H_1 @ np.linalg.inv(data0["transform"])
             H_0to2 = data2["transform"] @ H_2 @ np.linalg.inv(data0["transform"])
-            H_1to2 = data2["transform"] @ np.linalg.inv(H_1) @ H_2 @ np.linalg.inv(data1["transform"])
+            H_1to2 = (
+                data2["transform"]
+                @ np.linalg.inv(H_1)
+                @ H_2
+                @ np.linalg.inv(data1["transform"])
+            )
             return {
                 "view0": data0,
                 "view1": data1,

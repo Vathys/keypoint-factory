@@ -36,6 +36,8 @@ class TripletPipeline(TwoViewPipeline):
         # pred['0to1'],pred['0to2'], pred['1to2']
 
         assert not self.conf.run_gt_in_forward
+        assert not self.conf.pass_all_views
+
         pred0 = self.extract_view(data, "0")
         pred1 = self.extract_view(data, "1")
         pred2 = self.extract_view(data, "2")

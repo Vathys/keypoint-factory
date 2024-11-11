@@ -1,3 +1,4 @@
+
 data:
   name: megadepth
   views: 3
@@ -33,7 +34,7 @@ model:
     trainable: true
     reward: depth
   batch_triplets: false
-  enumerate_pairs: false
+  enumerate_pairs: true
 
 train:
   seed: 42

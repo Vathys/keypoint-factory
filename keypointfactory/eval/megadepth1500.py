@@ -6,7 +6,6 @@ from pprint import pprint
 from typing import Iterable
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import torch
 from omegaconf import OmegaConf
@@ -17,6 +16,7 @@ from ..models.cache_loader import CacheLoader
 from ..settings import DATA_PATH, EVAL_PATH
 from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
+from ..utils.tools import AUCMetric
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_pair_depth, eval_relative_pose_robust
@@ -46,7 +46,7 @@ class MegaDepth1500Pipeline(EvalPipeline):
             "padding": 4.0,
             "top_k_thresholds": None,  # None means all keypoints, otherwise a list of thresholds (which can also include None) # noqa: E501
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
-            "use_gt": False
+            "use_gt": False,
         },
     }
 
@@ -78,7 +78,9 @@ class MegaDepth1500Pipeline(EvalPipeline):
         dataset = get_dataset(data_conf["name"])(data_conf)
         return dataset.get_data_loader("test")
 
-    def get_predictions(self, experiment_dir, model=None, overwrite=False, get_last=False):
+    def get_predictions(
+        self, experiment_dir, model=None, overwrite=False, get_last=False
+    ):
         """Export a prediction file for each eval datapoint"""
         pred_file = experiment_dir / "predictions.h5"
         if not pred_file.exists() or overwrite:

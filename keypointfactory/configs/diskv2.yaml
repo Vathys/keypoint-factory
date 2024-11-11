@@ -9,14 +9,6 @@ model:
 
 benchmarks:
     hpatches:
-        data:
-            preprocessing:
-                resize: 768
-                side: long
-                interpolation: bilinear
-                antialias: False
-                align_corners: False
-                square_pad: true
         eval:
             top_k_thresholds: 2048
             top_k_by: scores

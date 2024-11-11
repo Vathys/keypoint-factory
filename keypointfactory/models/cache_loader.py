@@ -3,6 +3,7 @@ import string
 import h5py
 import torch
 
+from .. import logger
 from ..datasets.base_dataset import collate
 from ..settings import DATA_PATH
 from ..utils.tensor import batch_to_device
@@ -73,7 +74,8 @@ def log_blocking_process(fpath):
             for item in proc.open_files():
                 if item.path == str(fpath):
                     logger.debug(
-                        f"Process {proc.info['name']} (PID: {proc.info['pid']}) is holding a lock on {fpath}"
+                        f"""Process {proc.info['name']} (PID: {proc.info['pid']})
+                         is holding a lock on {fpath}"""
                     )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue

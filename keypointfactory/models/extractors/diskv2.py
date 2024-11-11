@@ -2,27 +2,26 @@ from pathlib import Path
 
 import torch
 
+from ...geometry.depth import simple_project, unproject
 from ...geometry.epipolar import (
     T_to_F,
     asymm_epipolar_distance_all,
     relative_pose_error,
 )
-from ...geometry.homography import warp_points_torch, homography_corner_error
-from ...geometry.depth import unproject, simple_project
+from ...geometry.homography import homography_corner_error, warp_points_torch
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
-from ..utils.unet import Unet
 from ..utils.misc import (
-    pad_and_stack,
-    select_on_last,
-    tile,
-    lscore,
     CycleMatcher,
     classify_by_epipolar,
     classify_by_homography,
+    lscore,
+    pad_and_stack,
+    select_on_last,
+    tile,
 )
-from ... import logger
+from ..utils.unet import Unet
 
 
 def point_distribution(logits, budget):
@@ -135,8 +134,6 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
-    b, _, _ = kpts0.shape
-
     H_0to1 = data["H_0to1"]
 
     kpts0_r = reproject_homography(
@@ -149,32 +146,14 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
     diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
 
-    dist0 = torch.norm(diff0, p=2, dim=-1).nan_to_num(nan=float("inf"))
-    dist1 = torch.norm(diff1, p=2, dim=-1).nan_to_num(nan=float("inf"))
+    dist0 = torch.norm(diff0, p=2, dim=-1)
+    dist1 = torch.norm(diff1, p=2, dim=-1)
 
-    min0_vals, min0_indices = torch.min(dist0, dim=-1)
-    min1_vals, min1_indices = torch.min(dist1, dim=-1)
+    reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
+    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
-    score0 = lscore(min0_vals, threshold, type=score_type)
-    score1 = lscore(min1_vals, threshold, type=score_type)
-
-    # with torch.no_grad():
-    #     mask0 = min1_indices.gather(1, min0_indices) == torch.arange(
-    #         min0_indices.shape[1], device=min0_indices.device
-    #     )
-    #     mask1 = min0_indices.gather(1, min1_indices) == torch.arange(
-    #         min1_indices.shape[1], device=min1_indices.device
-    #     )
-
-    #     cyclical_reproj_error0 = torch.where(
-    #         mask0, min0_vals, torch.tensor(float("inf"), device=min0_vals.device)
-    #     )
-    #     cyclical_reproj_error1 = torch.where(
-    #         mask1, min1_vals, torch.tensor(float("inf"), device=min1_vals.device)
-    #     )
-
-    # score0 = torch.where(mask0, score0, torch.tensor(-1.0, device=score0.device))
-    # score1 = torch.where(mask1, score1, torch.tensor(-1.0, device=score0.device))
+    score0 = lscore(reproj_error0, threshold, type=score_type)
+    score1 = lscore(reproj_error1, threshold, type=score_type)
 
     return score0, score1
 
@@ -182,7 +161,7 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
 class DISK(BaseModel):
     default_conf = {
         "window_size": 8,
-        "nms_radius": 2,  # matches with disk nms window of 5
+        "nms_radius": 2,  # matches with disk nms radius of 5
         "max_num_keypoints": None,
         "sample_budget": 4096,
         "force_num_keypoints": False,
@@ -195,8 +174,8 @@ class DISK(BaseModel):
             "kernel_size": 5,
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
-            "down": [16, 32, 64, 64],
-            "up": [64, 64, 1],
+            "down": [16, 32, 64, 64, 64],
+            "up": [64, 64, 64, 1],
             "upsample": "TrivialUpsample",
             "downsample": "TrivialDownsample",
             "down_block": "ThinDownBlock",  # second option is DownBlock
@@ -204,6 +183,7 @@ class DISK(BaseModel):
             # "dropout": False, not used yet
             "bias": True,
             "padding": True,
+            "train_invT": False,
         },
         "loss": {
             "score_type": "coarse",
@@ -439,7 +419,7 @@ class DISK(BaseModel):
 
     def loss(self, pred, data):
         if self.conf.reward == "depth":
-            elementwise_reward = depth_reward(
+            elementwise_reward0, elementwise_reward1 = depth_reward(
                 data,
                 pred,
                 threshold=self.conf.loss.reward_threshold,
@@ -447,7 +427,7 @@ class DISK(BaseModel):
                 lm_fp=self.lm_fp,
             )
         elif self.conf.reward == "epipolar":
-            elementwise_reward = epipolar_reward(
+            elementwise_reward0, elementwise_reward1 = epipolar_reward(
                 data,
                 pred,
                 threshold=self.conf.loss.reward_threshold,

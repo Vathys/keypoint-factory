@@ -785,7 +785,9 @@ def eval_homography_robust(data, pred, conf):
     kp0 = pred["keypoints0"].unsqueeze(0)
     kp1 = pred["keypoints1"].unsqueeze(0)
     if conf["use_gt"]:
-        pts0, pts1 = get_homography_matches(kp0, kp1, H_gt, conf["correctness_threshold"])
+        pts0, pts1 = get_homography_matches(
+            kp0, kp1, H_gt, conf["correctness_threshold"]
+        )
     else:
         descriptors0 = pred["descriptors0"].unsqueeze(0)
         descriptors1 = pred["descriptors1"].unsqueeze(0)
@@ -810,7 +812,9 @@ def eval_homography_robust(data, pred, conf):
         # R, t, inl = ret
         M = est["M_0to1"]
         inl = est["inliers"].numpy()
-        results["H_error_ransac"] = homography_corner_error(M, H_gt, data["view0"]["image_size"]).item()
+        results["H_error_ransac"] = homography_corner_error(
+            M, H_gt, data["view0"]["image_size"]
+        ).item()
         results["ransac_inl"] = np.sum(inl)
         results["ransac_inl%"] = np.mean(inl)
 

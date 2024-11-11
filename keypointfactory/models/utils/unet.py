@@ -1,5 +1,6 @@
 import torch
-from .blocks import get_module, AttentionBlock
+
+from .blocks import get_module
 
 
 class Unet(torch.nn.Module):
@@ -10,7 +11,7 @@ class Unet(torch.nn.Module):
         self.up = [int(u) for u in conf.arch.up]
         self.down = [int(d) for d in conf.arch.down]
         self.in_features = in_features
-        
+
         size = conf.arch.kernel_size
 
         down_block = get_module(conf.arch.down_block)

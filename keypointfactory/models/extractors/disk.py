@@ -3,19 +3,18 @@ from pathlib import Path
 import torch
 from omegaconf import OmegaConf
 
+from ...geometry.depth import simple_project, unproject
 from ...geometry.epipolar import (
     T_to_F,
     asymm_epipolar_distance_all,
     relative_pose_error,
 )
-from ...geometry.homography import warp_points_torch, homography_corner_error
-from ...geometry.depth import simple_project, unproject
+from ...geometry.homography import homography_corner_error, warp_points_torch
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
-from ..utils.unet import Unet
 from ..utils.misc import distance_matrix, pad_and_stack, select_on_last, tile
-from ... import logger
+from ..utils.unet import Unet
 
 
 def point_distribution(logits):

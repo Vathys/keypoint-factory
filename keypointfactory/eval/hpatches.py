@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+import seaborn as sns
 import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -16,10 +17,10 @@ from ..models.cache_loader import CacheLoader
 from ..settings import EVAL_PATH
 from ..utils.export_predictions import export_predictions
 from ..utils.tensor import map_tensor
+from ..utils.tools import AUCMetric
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
-from .utils import eval_pair_homography, eval_homography_robust
-from ..utils.tools import AUCMetric
+from .utils import eval_homography_robust, eval_pair_homography
 
 COL_TO_LABELS = {
     "num_covisible_correct": ("Number of correct covisible points", "NCC Ratio"),

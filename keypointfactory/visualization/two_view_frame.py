@@ -1,10 +1,9 @@
-import matplotlib.pyplot as plt
 import numpy as np
 
 from .local_frame import LocalFrame
 from . import viz2d
+from .local_frame import LocalFrame
 from .tools import FormatPrinter
-from ..geometry.homography import warp_points
 
 
 class TwoViewFrame(LocalFrame):

@@ -1,4 +1,5 @@
 import inspect
+import pprint
 import sys
 import warnings
 import pprint
@@ -8,11 +9,13 @@ from matplotlib.collections import PathCollection
 from matplotlib.lines import Line2D
 import torch
 from matplotlib.backend_tools import ToolToggleBase
+from matplotlib.collections import PathCollection
+from matplotlib.lines import Line2D
 from matplotlib.widgets import RadioButtons, Slider
 
+from ..geometry.depth import dense_warp_consistency, simple_project, unproject
 from ..geometry.epipolar import T_to_F, generalized_epi_dist
 from ..geometry.homography import sym_homography_error, warp_points_torch
-from ..geometry.depth import simple_project, unproject, dense_warp_consistency
 from ..visualization.viz2d import (
     cm_ranking,
     cm_RdGn,
