@@ -373,14 +373,11 @@ class DISK(BaseModel):
         "weights": None,
         "reward": "depth",
         "arch": {
-            "type": "original",
             "kernel_size": 5,
             "down": [16, 32, 64, 64, 64],
             "up": [64, 64, 64],
             "gate": "PReLU",
             "norm": "InstanceNorm2d",
-            "down": [],
-            "up": [],
             "upsample": "TrivialUpsample",
             "downsample": "TrivialDownsample",
             "down_block": "ThinDownBlock",  # second option is DownBlock
@@ -409,14 +406,13 @@ class DISK(BaseModel):
             OmegaConf.create(
                 {
                     "arch": {
-                        "down": self.conf.arch.down,
+                        "down": OmegaConf.to_container(self.conf.arch.down),
                         "up": OmegaConf.to_container(self.conf.arch.up)
                         + [self.conf.desc_dim + 1],
                     }
                 }
             ),
         )
-
         self.unet = Unet(
             in_features=3,
             conf=self.conf,

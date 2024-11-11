@@ -4,9 +4,10 @@ from typing import List, Optional, Tuple
 import torch
 
 from ...geometry.homography import warp_points_torch
+from ...geometry.epipolar import asymm_epipolar_distance_all, T_to_F
+from ...geometry.depth import simple_project, unproject
 
 
-def lscore(dist, thres, type="linear", rescale=True):
 def lscore(dist, thres, type="linear", rescale=True):
     score = None
     if type == "correct":
@@ -14,23 +15,13 @@ def lscore(dist, thres, type="linear", rescale=True):
             torch.isnan(dist), -float("inf"), torch.where(dist < thres, 1, -0.05)
         )
     elif type == "linear":
-        score = torch.where(
-            torch.isnan(dist),
-            -float("inf"),
-            1 - (dist / thres)
-        )
+        score = torch.where(torch.isnan(dist), -float("inf"), 1 - (dist / thres))
     elif type == "fine":
         score = torch.where(
-            torch.isnan(dist),
-            -float("inf"),
-            torch.log(thres / (dist + 1e-8)) / thres
+            torch.isnan(dist), -float("inf"), torch.log(thres / (dist + 1e-8)) / thres
         )
     elif type == "coarse":
-        score = torch.where(
-            torch.isnan(dist),
-            -float("inf"),
-            1 - (dist / thres) ** 2
-        )
+        score = torch.where(torch.isnan(dist), -float("inf"), 1 - (dist / thres) ** 2)
     else:
         raise RuntimeError(f"Type {type} not found...")
 
@@ -38,29 +29,39 @@ def lscore(dist, thres, type="linear", rescale=True):
         score_ = score.clone()
         for b in range(score_.shape[0]):
             if (score_[b] < 0).sum() > 0:
-                score_[b][score_[b] < 0] = score_[b][score_[b] < 0] / score_[b][score_[b] < 0].abs().max()
+                score_[b][score_[b] < 0] = (
+                    score_[b][score_[b] < 0] / score_[b][score_[b] < 0].abs().max()
+                )
             if (score_[b] > 0).sum() > 0:
-                score_[b][score_[b] > 0] = score_[b][score_[b] > 0] / score_[b][score_[b] > 0].abs().max()
+                score_[b][score_[b] > 0] = (
+                    score_[b][score_[b] > 0] / score_[b][score_[b] > 0].abs().max()
+                )
         score_ = torch.where(torch.isnan(score_), -1, score_)
         return score_
     else:
         return score
 
+
 def and_mult(a, b, rescale=True):
     score = torch.mul(a.abs(), b.abs()) * torch.where(
         torch.logical_and(a > 0, b > 0), 1, -1
     )
-    
+
     if rescale:
         score_ = score.clone()
         for b in range(score_.shape[0]):
             if (score_[b] < 0).sum() > 0:
-                score_[b][score_[b] < 0] = score_[b][score_[b] < 0] / score_[b][score_[b] < 0].abs().max()
+                score_[b][score_[b] < 0] = (
+                    score_[b][score_[b] < 0] / score_[b][score_[b] < 0].abs().max()
+                )
             if (score_[b] > 0).sum() > 0:
-                score_[b][score_[b] > 0] = score_[b][score_[b] > 0] / score_[b][score_[b] > 0].abs().max()
+                score_[b][score_[b] > 0] = (
+                    score_[b][score_[b] > 0] / score_[b][score_[b] > 0].abs().max()
+                )
         return score_
     else:
         return score
+
 
 def to_sequence(map):
     return map.flatten(-2).transpose(-1, -2)
@@ -203,42 +204,6 @@ def distance_matrix(fs1, fs2):
     return 1.414213 * (1.0 - dist).clamp(min=1e-6).sqrt()
 
 
-def unproject(kpts, depth, cam, pose):
-    batch, h, w = depth.shape
-    in_range = (
-        (0 <= kpts[:, :, 0])
-        & (kpts[:, :, 0] < w)
-        & (0 <= kpts[:, :, 1])
-        & (kpts[:, :, 1] < h)
-    )
-    finite = torch.isfinite(kpts).all(dim=2)
-    valid_depth = in_range & finite
-
-    valid_kpts = []
-    for b in range(batch):
-        valid_kpts.append(kpts[b, valid_depth[b, :], :].to(torch.int64))
-    fdepth = torch.full(
-        kpts.shape[:2],
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
-    )
-
-    for b in range(batch):
-        fdepth[b, valid_depth[b]] = depth[b, valid_kpts[b][:, 1], valid_kpts[b][:, 0]]
-
-    kptsc = cam.image2cam(kpts) * fdepth.unsqueeze(-1).repeat(1, 1, 3)
-    kptsw = pose.inv().transform(kptsc)
-
-    return kptsw
-
-
-def project(kptsw, cam, pose):
-    ext = pose.transform(kptsw)
-    kpts, _ = cam.cam2image(ext)
-    return kpts
-
-
 def reproject_homography(kpts, H, h, w, inverse):
     kptsw = warp_points_torch(kpts, H, inverse)
 
@@ -261,6 +226,9 @@ def reproject_homography(kpts, H, h, w, inverse):
 
 
 class CycleMatcher:
+    def __init__(self, threshold):
+        self.threshold = threshold
+
     def match_by_homography(self, data, pred):
         kpts0 = pred["keypoints0"]
         kpts1 = pred["keypoints1"]
@@ -279,6 +247,7 @@ class CycleMatcher:
 
         dist0 = torch.norm(diff0, p=2, dim=-1)
         dist1 = torch.norm(diff1, p=2, dim=-1)
+
         dist = torch.min(dist0, dist1)
         mask_visible = ~torch.isnan(dist)
         inf = dist.new_tensor(float("inf"))
@@ -291,7 +260,7 @@ class CycleMatcher:
 
         ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
         ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
-        positive = ismin0 & ismin1
+        positive = ismin0 & ismin1 & (dist < self.threshold**2)
         validm0 = positive.any(-1)
         validm1 = positive.any(-2)
 
@@ -330,8 +299,8 @@ class CycleMatcher:
         T0 = data["view0"]["T_w2cam"]
         T1 = data["view1"]["T_w2cam"]
 
-        kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-        kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+        kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+        kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -350,7 +319,57 @@ class CycleMatcher:
 
         ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
         ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
-        positive = ismin0 & ismin1
+        positive = ismin0 & ismin1 & (dist < self.threshold**2)
+        validm0 = positive.any(-1)
+        validm1 = positive.any(-2)
+
+        unmatched0 = min0.new_tensor(-1)
+        m0 = torch.where(validm0, min0, unmatched0)
+        m1 = torch.where(validm1, min1, unmatched0)
+
+        matches = []
+        for b in range(kpts0.shape[0]):
+            cyclical0 = (
+                m1[b][m0[b][validm0[b]]]
+                == torch.arange(m0[b].shape[0], device=m0.device)[validm0[b]]
+            )
+
+            matches.append(
+                torch.stack(
+                    [
+                        torch.arange(m0.shape[1], device=m0.device)[validm0[b]][
+                            cyclical0
+                        ],
+                        m0[b][validm0[b]][cyclical0],
+                    ]
+                )
+            )
+        matches = pad_and_stack(matches, None, -1, mode="constant", constant=-1)
+        return matches.transpose(1, 2)
+
+    def match_by_epipolar(self, data, pred):
+        F_0_1 = T_to_F(data["view0"]["camera"], data["view1"]["camera"], data["T_0to1"])
+        F_1_0 = T_to_F(data["view1"]["camera"], data["view0"]["camera"], data["T_1to0"])
+
+        kpts0 = pred["keypoints0"]
+        kpts1 = pred["keypoints1"]
+
+        epi_0_1 = asymm_epipolar_distance_all(kpts0, kpts1, F_0_1).abs()
+        epi_1_0 = asymm_epipolar_distance_all(kpts1, kpts0, F_1_0).abs()
+
+        dist = torch.max(epi_1_0, epi_0_1.transpose(-1, -2))
+        mask_visible = ~torch.isnan(dist)
+        inf = dist.new_tensor(float("inf"))
+        dist = torch.where(mask_visible, dist, inf)
+
+        min0 = dist.min(-1).indices
+        min1 = dist.min(-2).indices
+        ismin0 = torch.zeros(dist.shape, dtype=torch.bool, device=epi_0_1.device)
+        ismin1 = ismin0.clone()
+
+        ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
+        ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
+        positive = ismin0 & ismin1 & (dist < self.threshold**2)
         validm0 = positive.any(-1)
         validm1 = positive.any(-2)
 
@@ -458,8 +477,8 @@ def classify_by_depth(data, pred, threshold=2.0):
     T0 = data["view0"]["T_w2cam"]
     T1 = data["view1"]["T_w2cam"]
 
-    kpts0_r = project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
-    kpts1_r = project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
+    kpts0_r = simple_project(unproject(kpts0, depth0, cam0, T0), cam1, T1)
+    kpts1_r = simple_project(unproject(kpts1, depth1, cam1, T1), cam0, T0)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
