@@ -1,5 +1,5 @@
 import torch
-from .blocks import get_module
+from .blocks import get_module, AttentionBlock
 
 
 class Unet(torch.nn.Module):
@@ -37,14 +37,49 @@ class Unet(torch.nn.Module):
         for params in self.parameters():
             self.n_params += params.numel()
 
-    def forward(self, input):
-        features = [input]
-        for block in self.path_down:
-            features.append(block(features[-1]))
+    def forward(self, input1=None, input2=None):
+        assert input1 is not None or input2 is not None
 
-        f_bot = features[-1]
-        features_horizontal = features[-2::-1]
-        for layer, f_hor in zip(self.path_up, features_horizontal):
-            f_bot = layer(f_bot, f_hor)
+        if input1 is not None:
+            features1 = [input1]
+            for block in self.path_down:
+                features1.append(block(features1[-1]))
 
-        return f_bot
+        if input2 is not None:
+            features2 = [input2]
+            for block in self.path_down:
+                features2.append(block(features2[-1]))
+
+        if input1 is not None and input2 is not None:
+            f_bot1 = out1 = features1[-1]
+            f_bot2 = out2 = features2[-1]
+            features_horizontal1 = features1[-2::-1]
+            features_horizontal2 = features2[-2::-1]
+            for layer, f_hor1, f_hor2 in zip(
+                self.path_up,
+                features_horizontal1,
+                features_horizontal2,
+            ):
+                f_bot1 = layer(out1, f_hor1, out2)
+                f_bot2 = layer(out2, f_hor2, out1)
+
+                out1 = f_bot1
+                out2 = f_bot2
+
+            return out1, out2
+        elif input1 is not None:
+            f_bot = features1[-1]
+            features_horizontal = features1[-2::-1]
+
+            for layer, f_hor in zip(self.path_up, features_horizontal):
+                f_bot = layer(f_bot, f_hor)
+
+            return f_bot
+        else:
+            f_bot = features2[-1]
+            features_horizontal = features2[-2::-1]
+
+            for layer, f_hor in zip(self.path_up, features_horizontal):
+                f_bot = layer(f_bot, f_hor)
+
+            return f_bot

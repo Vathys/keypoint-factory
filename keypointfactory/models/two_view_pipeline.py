@@ -29,6 +29,7 @@ class TwoViewPipeline(BaseModel):
         "ground_truth": {"name": None},
         "allow_no_extract": False,
         "run_gt_in_forward": False,
+        "pass_all_views": False,
     }
     required_data_keys = ["view0", "view1"]
     strict_conf = False  # need to pass new confs to children models
@@ -95,12 +96,15 @@ class TwoViewPipeline(BaseModel):
         return detach
 
     def _forward(self, data):
-        pred0 = self.extract_view(data, "0")
-        pred1 = self.extract_view(data, "1")
-        pred = {
-            **{k + "0": v for k, v in pred0.items()},
-            **{k + "1": v for k, v in pred1.items()},
-        }
+        if self.conf.pass_all_views:
+            pred = self.extractor(data)
+        else:
+            pred0 = self.extract_view(data, "0")
+            pred1 = self.extract_view(data, "1")
+            pred = {
+                **{k + "0": v for k, v in pred0.items()},
+                **{k + "1": v for k, v in pred1.items()},
+            }
 
         # Remove matcher component to avoid later confusion?
         if self.conf.filter.name:

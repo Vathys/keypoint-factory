@@ -155,26 +155,27 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     min0_vals, min0_indices = torch.min(dist0, dim=-1)
     min1_vals, min1_indices = torch.min(dist1, dim=-1)
 
-    mask0 = min1_indices.gather(1, min0_indices) == torch.arange(
-        min0_indices.shape[1], device=min0_indices.device
-    )
-    mask1 = min0_indices.gather(1, min1_indices) == torch.arange(
-        min1_indices.shape[1], device=min1_indices.device
-    )
+    score0 = lscore(min0_vals, threshold, type=score_type)
+    score1 = lscore(min1_vals, threshold, type=score_type)
 
-    score0 = -torch.ones(kpts0.shape[0], kpts0.shape[1], device=kpts0.device)
-    score1 = -torch.ones(kpts1.shape[0], kpts1.shape[1], device=kpts1.device)
+    # with torch.no_grad():
+    #     mask0 = min1_indices.gather(1, min0_indices) == torch.arange(
+    #         min0_indices.shape[1], device=min0_indices.device
+    #     )
+    #     mask1 = min0_indices.gather(1, min1_indices) == torch.arange(
+    #         min1_indices.shape[1], device=min1_indices.device
+    #     )
 
-    cyclical_reproj_error0 = torch.where(
-        mask0, min0_vals, torch.tensor(float("inf"), device=min0_vals.device)
-    )
-    cyclical_reproj_error1 = torch.where(
-        mask1, min1_vals, torch.tensor(float("inf"), device=min1_vals.device)
-    )
+    #     cyclical_reproj_error0 = torch.where(
+    #         mask0, min0_vals, torch.tensor(float("inf"), device=min0_vals.device)
+    #     )
+    #     cyclical_reproj_error1 = torch.where(
+    #         mask1, min1_vals, torch.tensor(float("inf"), device=min1_vals.device)
+    #     )
 
-    score0 = lscore(cyclical_reproj_error0, threshold, type=score_type)
-    score1 = lscore(cyclical_reproj_error1, threshold, type=score_type)
-    
+    # score0 = torch.where(mask0, score0, torch.tensor(-1.0, device=score0.device))
+    # score1 = torch.where(mask1, score1, torch.tensor(-1.0, device=score0.device))
+
     return score0, score1
 
 
@@ -211,7 +212,7 @@ class DISK(BaseModel):
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
-    required_data_keys = ["image"]
+    required_data_keys = []
 
     def _init(self, conf):
         self.set_initialized()
@@ -268,7 +269,7 @@ class DISK(BaseModel):
             print(missing_keys)
             print(unexpected_keys)
 
-        self.val_matcher = CycleMatcher()
+        self.val_matcher = CycleMatcher(self.conf.loss.reward_threshold)
 
     def _sample(self, heatmaps):
         v = self.conf.window_size
@@ -333,75 +334,105 @@ class DISK(BaseModel):
 
         return keypoints, scores
 
-    def get_heatmap(self, images):
+    def get_heatmap(self, image0=None, image1=None):
+        assert image0 is not None or image1 is not None
         if self.conf.pad_if_not_divisible:
-            h, w = images.shape[2:]
-            pd_h = 16 - h % 16 if h % 16 > 0 else 0
-            pd_w = 16 - w % 16 if w % 16 > 0 else 0
-            images = torch.nn.functional.pad(images, (0, pd_w, 0, pd_h), value=0.0)
+            if image0 is not None:
+                h, w = image0.shape[2:]
+                pd_h = 16 - h % 16 if h % 16 > 0 else 0
+                pd_w = 16 - w % 16 if w % 16 > 0 else 0
+                image0 = torch.nn.functional.pad(image0, (0, pd_w, 0, pd_h), value=0.0)
 
-        heatmap = self.unet(images)
+            if image1 is not None:
+                h, w = image1.shape[2:]
+                pd_h = 16 - h % 16 if h % 16 > 0 else 0
+                pd_w = 16 - w % 16 if w % 16 > 0 else 0
+                image1 = torch.nn.functional.pad(image1, (0, pd_w, 0, pd_h), value=0.0)
 
-        return heatmap
+        if image0 is not None and image1 is not None:
+            heatmap0, heatmap1 = self.unet(input1=image0, input2=image1)
+
+            return heatmap0, heatmap1
+        elif image0 is not None:
+            heatmap = self.unet(input1=image0)
+            return heatmap
+        else:
+            heatmap = self.unet(input1=image1)
+            return heatmap
 
     def _forward(self, data):
-        images = data["image"]
+        def process_heatmap(heatmap, image_size):
+            if self.training:
+                # Use sampling during training
+                points, logps = self._sample(heatmap)
+            else:
+                # Use NMS during evaluation
+                points, logps = self._nms(heatmap)
 
-        heatmap = self.get_heatmap(images)
+            keypoints = []
+            scores = []
 
-        if self.training:
-            # Use sampling during training
-            points, logps = self._sample(heatmap)
-        else:
-            # Use NMS during evaluation
-            points, logps = self._nms(heatmap)
+            for i, (point, logp) in enumerate(zip(points, logps)):
+                if self.conf.max_num_keypoints is not None:
+                    n = min(self.conf.max_num_keypoints + 1, logp.numel())
+                    minus_threshold, _ = torch.kthvalue(-logp, n)
+                    mask = logp > -minus_threshold
 
-        keypoints = []
-        scores = []
+                    point = point[mask]
+                    logp = logp[mask]
 
-        for i, (point, logp) in enumerate(zip(points, logps)):
-            if self.conf.max_num_keypoints is not None:
-                n = min(self.conf.max_num_keypoints + 1, logp.numel())
-                minus_threshold, _ = torch.kthvalue(-logp, n)
-                mask = logp > -minus_threshold
+                if self.conf.pad_edges > 0:
+                    image_shape = image_size[i]
+                    vis = torch.all(
+                        (point > self.conf.pad_edges)
+                        & (point < image_shape - self.conf.pad_edges),
+                        dim=-1,
+                    )
+                    point = point[vis]
+                    logp = logp[vis]
 
-                point = point[mask]
-                logp = logp[mask]
+                x, y = point.T
 
-            if self.conf.pad_edges > 0:
-                image_shape = data["image_size"][i]
-                vis = torch.all(
-                    (point > self.conf.pad_edges)
-                    & (point < image_shape - self.conf.pad_edges),
-                    dim=-1,
+                keypoints.append(point)
+                scores.append(logp)
+
+            if self.conf.force_num_keypoints:
+                # pad to target_length
+                target_length = self.conf.max_num_keypoints
+                keypoints = pad_and_stack(
+                    keypoints,
+                    target_length,
+                    -2,
+                    mode="zeros",
                 )
-                point = point[vis]
-                logp = logp[vis]
+                scores = pad_and_stack(scores, target_length, -1, mode="zeros")
+            else:
+                keypoints = torch.stack(keypoints, 0)
+                scores = torch.stack(scores, 0)
 
-            x, y = point.T
+            return {
+                "keypoints": keypoints.float(),
+                "heatmap": heatmap,
+                "keypoint_scores": scores.float(),
+            }
 
-            keypoints.append(point)
-            scores.append(logp)
-
-        if self.conf.force_num_keypoints:
-            # pad to target_length
-            target_length = self.conf.max_num_keypoints
-            keypoints = pad_and_stack(
-                keypoints,
-                target_length,
-                -2,
-                mode="zeros",
-            )
-            scores = pad_and_stack(scores, target_length, -1, mode="zeros")
+        if "view0" in data:
+            if "view1" in data:
+                heatmap0, heatmap1 = self.get_heatmap(
+                    data["view0"]["image"], data["view1"]["image"]
+                )
+                pred = {}
+                pred0 = process_heatmap(heatmap0, data["view0"]["image_size"])
+                pred1 = process_heatmap(heatmap1, data["view1"]["image_size"])
+                pred = {f"{k}0": v for k, v in pred0.items()}
+                pred = {**pred, **{f"{k}1": v for k, v in pred1.items()}}
+                return pred
+            else:
+                heatmap = self.get_heatmap(data["view0"]["image"])
+            return process_heatmap(heatmap, data["view0"]["image_size"])
         else:
-            keypoints = torch.stack(keypoints, 0)
-            scores = torch.stack(scores, 0)
-
-        return {
-            "keypoints": keypoints.float(),
-            "heatmap": heatmap,
-            "keypoint_scores": scores.float(),
-        }
+            heatmap = self.get_heatmap(data["image"])
+            return process_heatmap(heatmap, data["image_size"])
 
     def _pre_loss_callback(self, seed, epoch):
         pass

@@ -288,7 +288,7 @@ class DISK_EV(BaseModel):
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
-    required_data_keys = ["image"]
+    required_data_keys = []
 
     def _init(self, conf):
         self.set_initialized()
@@ -341,7 +341,7 @@ class DISK_EV(BaseModel):
             print(missing_keys)
             print(unexpected_keys)
 
-        self.val_matcher = CycleMatcher()
+        self.val_matcher = CycleMatcher(self.conf.loss.reward_threshold)
 
         self.lm_kp = self.conf.loss.lambda_kp
 
@@ -408,92 +408,122 @@ class DISK_EV(BaseModel):
 
         return keypoints, scores
 
-    def get_heatmap_and_descriptors(self, data):
-        images = data["image"]
+    def get_heatmap_and_descriptors(self, image0=None, image1=None):
+        assert image0 is not None or image1 is not None
         if self.conf.pad_if_not_divisible:
-            h, w = images.shape[2:]
-            pd_h = 16 - h % 16 if h % 16 > 0 else 0
-            pd_w = 16 - w % 16 if w % 16 > 0 else 0
-            images = torch.nn.functional.pad(images, (0, pd_w, 0, pd_h), value=0.0)
+            if image0 is not None:
+                h, w = image0.shape[2:]
+                pd_h = 16 - h % 16 if h % 16 > 0 else 0
+                pd_w = 16 - w % 16 if w % 16 > 0 else 0
+                image0 = torch.nn.functional.pad(image0, (0, pd_w, 0, pd_h), value=0.0)
 
-        output = self.unet(images)
-        descs = output[:, : self.conf.desc_dim]
-        heatmaps = output[:, self.conf.desc_dim :]
+            if image1 is not None:
+                h, w = image1.shape[2:]
+                pd_h = 16 - h % 16 if h % 16 > 0 else 0
+                pd_w = 16 - w % 16 if w % 16 > 0 else 0
+                image1 = torch.nn.functional.pad(image1, (0, pd_w, 0, pd_h), value=0.0)
 
-        return heatmaps, descs
+        if image0 is not None and image1 is not None:
+            output0, output1 = self.unet(input1=image0, input2=image1)
+            desc0 = output0[:, : self.conf.desc_dim]
+            heatmap0 = output0[:, self.conf.desc_dim :]
+            desc1 = output1[:, : self.conf.desc_dim]
+            heatmap1 = output1[:, self.conf.desc_dim :]
+
+            return heatmap0, desc0, heatmap1, desc1
+        elif image0 is not None:
+            output = self.unet(input1=image0)
+            desc = output[:, : self.conf.desc_dim]
+            heatmap = output[:, self.conf.desc_dim :]
+            return heatmap, desc
+        else:
+            output = self.unet(input1=image1)
+            desc = output[:, : self.conf.desc_dim]
+            heatmap = output[:, self.conf.desc_dim :]
+            return heatmap, desc
 
     def _forward(self, data):
-        images = data["image"]
-        if self.conf.pad_if_not_divisible:
-            h, w = images.shape[2:]
-            pd_h = 16 - h % 16 if h % 16 > 0 else 0
-            pd_w = 16 - w % 16 if w % 16 > 0 else 0
-            images = torch.nn.functional.pad(images, (0, pd_w, 0, pd_h), value=0.0)
+        def process_heatmap(heatmap, descs, image_size):
+            if self.training:
+                # Use sampling during training
+                points, logps = self._sample(heatmap)
+            else:
+                # Use NMS during evaluation
+                points, logps = self._nms(heatmap)
 
-        output = self.unet(images)
-        descs = output[:, : self.conf.desc_dim]
-        heatmaps = output[:, self.conf.desc_dim :]
+            keypoints = []
+            scores = []
+            descriptors = []
 
-        if self.training:
-            # Use sampling during training
-            points, logps = self._sample(heatmaps)
-        else:
-            # Use NMS during evaluation
-            points, logps = self._nms(heatmaps)
+            for i, (point, logp) in enumerate(zip(points, logps)):
+                if self.conf.max_num_keypoints is not None:
+                    n = min(self.conf.max_num_keypoints + 1, logp.numel())
+                    minus_threshold, _ = torch.kthvalue(-logp, n)
+                    mask = logp > -minus_threshold
 
-        keypoints = []
-        scores = []
-        descriptors = []
+                    point = point[mask]
+                    logp = logp[mask]
 
-        for i, (point, logp) in enumerate(zip(points, logps)):
-            if self.conf.max_num_keypoints is not None:
-                n = min(self.conf.max_num_keypoints + 1, logp.numel())
-                minus_threshold, _ = torch.kthvalue(-logp, n)
-                mask = logp > -minus_threshold
+                if self.conf.pad_edges > 0:
+                    image_shape = image_size[i]
+                    vis = torch.all(
+                        (point > self.conf.pad_edges)
+                        & (point < image_shape - self.conf.pad_edges),
+                        dim=-1,
+                    )
+                    point = point[vis]
+                    logp = logp[vis]
 
-                point = point[mask]
-                logp = logp[mask]
+                x, y = point.T
+                desc = descs[i][:, y, x].T
+                desc = torch.nn.functional.normalize(desc, dim=-1)
 
-            if self.conf.pad_edges > 0:
-                image_shape = data["image_size"][i]
-                vis = torch.all(
-                    (point > self.conf.pad_edges)
-                    & (point < image_shape - self.conf.pad_edges),
-                    dim=-1,
+                keypoints.append(point)
+                scores.append(logp)
+                descriptors.append(desc)
+
+            if self.conf.force_num_keypoints:
+                # pad to target_length
+                target_length = self.conf.max_num_keypoints
+                keypoints = pad_and_stack(
+                    keypoints,
+                    target_length,
+                    -2,
+                    mode="zeros",
                 )
-                point = point[vis]
-                logp = logp[vis]
+                scores = pad_and_stack(scores, target_length, -1, mode="zeros")
+                descriptors = pad_and_stack(
+                    descriptors, target_length, -2, mode="zeros"
+                )
+            else:
+                keypoints = torch.stack(keypoints, 0)
+                scores = torch.stack(scores, 0)
+                descriptors = torch.stack(descriptors, 0)
 
-            x, y = point.T
-            desc = descs[i][:, y, x].T
-            desc = torch.nn.functional.normalize(desc, dim=-1)
+            return {
+                "keypoints": keypoints.float(),
+                "heatmap": heatmap,
+                "keypoint_scores": scores.float(),
+                "descriptors": descriptors.float(),
+            }
 
-            keypoints.append(point)
-            scores.append(logp)
-            descriptors.append(desc)
-
-        if self.conf.force_num_keypoints:
-            # pad to target_length
-            target_length = self.conf.max_num_keypoints
-            keypoints = pad_and_stack(
-                keypoints,
-                target_length,
-                -2,
-                mode="zeros",
-            )
-            scores = pad_and_stack(scores, target_length, -1, mode="zeros")
-            descriptors = pad_and_stack(descriptors, target_length, -2, mode="zeros")
+        if "view0" in data:
+            if "view1" in data:
+                heatmap0, desc0, heatmap1, desc1 = self.get_heatmap_and_descriptors(
+                    data["view0"]["image"], data["view1"]["image"]
+                )
+                pred = {}
+                pred0 = process_heatmap(heatmap0, desc0, data["view0"]["image_size"])
+                pred1 = process_heatmap(heatmap1, desc1, data["view1"]["image_size"])
+                pred = {f"{k}0": v for k, v in pred0.items()}
+                pred = {**pred, **{f"{k}1": v for k, v in pred1.items()}}
+                return pred
+            else:
+                heatmap, desc = self.get_heatmap_and_descriptors(data["view0"]["image"])
+            return process_heatmap(heatmap, desc, data["view0"]["image_size"])
         else:
-            keypoints = torch.stack(keypoints, 0)
-            scores = torch.stack(scores, 0)
-            descriptors = torch.stack(descriptors, 0)
-
-        return {
-            "keypoints": keypoints.float(),
-            "heatmap": heatmaps,
-            "keypoint_scores": scores.float(),
-            "descriptors": descriptors.float(),
-        }
+            heatmap, desc = self.get_heatmap_and_descriptors(data["image"])
+            return process_heatmap(heatmap, desc, data["image_size"])
 
     def _pre_loss_callback(self, seed, epoch):
         if epoch == 0:
