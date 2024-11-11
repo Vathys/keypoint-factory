@@ -8,6 +8,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import PIL.Image
 from omegaconf import OmegaConf
+from kornia.geometry.conversions import (
+    normalize_quaternion,
+    quaternion_to_rotation_matrix,
+)
 
 from ..settings import DATA_PATH
 from ..geometry.wrappers import Camera, Pose
@@ -29,6 +33,29 @@ def sample_n(data, num, seed=None):
         return data[selected]
     else:
         return data
+
+
+def convert_to_rotation(quatts):
+    qtrans = torch.tensor(quatts[:3])
+    qrot = torch.tensor(quatts[3:])
+    qrot = torch.tensor([qrot[-1], qrot[0], qrot[1], qrot[2]])
+
+    ned2cam = torch.tensor(
+        [
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+
+    rotmat = quaternion_to_rotation_matrix(qrot)
+    SE = torch.eye(4)
+
+    SE[:3, :3] = rotmat.inverse()
+    SE[:3, 3] = -rotmat.inverse() @ qtrans
+
+    return ned2cam @ SE @ ned2cam.inverse()
 
 
 class TartanAir(BaseDataset):
@@ -196,6 +223,8 @@ class _PairDataset(torch.utils.data.Dataset):
         K = self.g_camera_intrinsics
         T = self.poses[scene][idx][side].astype(np.float32, copy=False)
 
+        T = convert_to_rotation(T)
+
         if self.conf.read_image:
             img = load_image(path, self.conf.grayscale)
         else:
@@ -237,7 +266,7 @@ class _PairDataset(torch.utils.data.Dataset):
             "name": name,
             "scene": scene,
             "T_w2cam": Pose.from_4x4mat(T),
-            "depth": 80.0 / depth,
+            "depth": depth,
             "camera": Camera.from_calibration_matrix(K).float(),
             **data,
         }
