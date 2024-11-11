@@ -12,7 +12,7 @@ from matplotlib.widgets import RadioButtons, Slider
 
 from ..geometry.epipolar import T_to_F, generalized_epi_dist
 from ..geometry.homography import sym_homography_error, warp_points_torch
-from ..geometry.depth import simple_project, unproject
+from ..geometry.depth import simple_project, unproject, dense_warp_consistency
 from ..visualization.viz2d import (
     cm_ranking,
     cm_RdGn,
@@ -225,7 +225,8 @@ class InteractiveEpipolarKeypointPlot:
     plot_name = "interactive_epipolar_keypoints"
     required_keys = ["keypoints0", "keypoints1", "T_0to1", "view0", "view1"]
 
-    colors = ["blue", "red", "yellow"]
+    line_colors = ["tab:blue", "tab:red", "tab:olive"]
+    kpt_colors = ["tab:purple", "tab:orange", "tab:cyan"]
 
     def __init__(self, fig, axes, data, preds):
         self.fig = fig
@@ -269,14 +270,20 @@ class InteractiveEpipolarKeypointPlot:
             xy = self.preds[list(self.preds.keys())[i]][f"keypoints{axes_index}"][0][
                 ind, :
             ]
-            # self._plot_epipolar(xy, i, axes_index)
+            self._plot_epipolar(xy, i, axes_index)
             if "depth" in self.data["view0"].keys():
                 self._plot_reprojection(xy, i, axes_index)
             handles = [
                 Line2D(
-                    [0], [0], marker=".", markersize=3, color=color, linestyle="dashed"
+                    [0],
+                    [0],
+                    marker=".",
+                    markersize=3,
+                    color=l_color,
+                    markeredgecolor=k_color,
+                    linestyle="dashed",
                 )
-                for color in self.colors
+                for l_color, k_color in zip(self.line_colors, self.kpt_colors)
             ]
             self.fig.legend(handles, ["view0", "view1", "view2"], loc="upper right")
 
@@ -302,7 +309,7 @@ class InteractiveEpipolarKeypointPlot:
                     self.data[f"view{index_tuple[1]}"]["image_size"][0]
                     .flip(dims=(0,))
                     .numpy(),
-                    color=self.colors[index_tuple[0]],
+                    color=self.line_colors[index_tuple[0]],
                     pickable=False,
                 )
 
@@ -319,7 +326,7 @@ class InteractiveEpipolarKeypointPlot:
                     self.data[f"view{index_tuple[4]}"]["image_size"][0]
                     .flip(dims=(0,))
                     .numpy(),
-                    color=self.colors[index_tuple[0]],
+                    color=self.line_colors[index_tuple[0]],
                     pickable=False,
                 )
 
@@ -350,9 +357,9 @@ class InteractiveEpipolarKeypointPlot:
             ]
             plot_keypoints(
                 [xy_r],
-                ps=10,
+                ps=20,
                 axes=[self.axes[row_idx][index_tuple[1]]],
-                colors=self.colors[index_tuple[0]],
+                colors=self.kpt_colors[index_tuple[0]],
                 pickable=False,
             )
 
@@ -371,11 +378,38 @@ class InteractiveEpipolarKeypointPlot:
             ]
             plot_keypoints(
                 [xy_r],
-                ps=10,
+                ps=20,
                 axes=[self.axes[row_idx][index_tuple[2]]],
-                colors=self.colors[index_tuple[0]],
+                colors=self.kpt_colors[index_tuple[0]],
                 pickable=False,
             )
+
+
+class DenseConsistencyPlot:
+    plot_name = "dense_consistency"
+    required_keys = ["view0", "view1", "T_0to1"]
+
+    def __init__(self, fig, axes, data, preds):
+        depth0 = data["view0"]["depth"][0]
+        depth1 = data["view1"]["depth"][0]
+        camera0 = data["view0"]["camera"][0]
+        camera1 = data["view1"]["camera"][0]
+        T = data["T_0to1"][0]
+
+        dkpts0, valid0 = dense_warp_consistency(
+            depth1, depth0, T.inv(), camera1, camera0
+        )
+        dkpts1, valid0 = dense_warp_consistency(depth0, depth1, T, camera0, camera1)
+
+        [
+            plot_keypoints(
+                [dkpts0[0].flatten(0, 1), dkpts1[0].flatten(0, 1)],
+                ps=1,
+                a=0.5,
+                axes=axes[i],
+            )
+            for i in range(len(preds))
+        ]
 
 
 class LinePlot:
