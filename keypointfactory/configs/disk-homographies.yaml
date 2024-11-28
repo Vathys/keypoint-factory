@@ -9,6 +9,7 @@ data:
   homography:
     difficulty: 0.7
     max_angle: 90
+    patch_shape: [768, 768]
   photometric:
     name: lg
 

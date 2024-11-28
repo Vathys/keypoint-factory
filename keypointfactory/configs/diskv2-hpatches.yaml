@@ -9,7 +9,7 @@ data:
     antialias: False
     align_corners: False
     square_pad: true
-  triplets: true
+  triplet: true
 
 model:
   name: triplet_pipeline
@@ -23,6 +23,12 @@ model:
     loss:
       reward_threshold: 3
       score_type: coarse
+      lm_c: 0.01
+    arch:
+      down: [16,32,64]
+      up: [64,1]
+      down_block: ResDownBlock
+      up_block: ResUpBlock
   batch_triplets: false
   enumerate_pairs: true
 
@@ -44,6 +50,7 @@ train:
   plot:
     [5, "keypointfactory.visualization.visualize_batch.make_keypoint_figures"]
   substep: 1
+  warmup: 0
 
 benchmarks:
   hpatches:

@@ -9,7 +9,7 @@ data:
     antialias: false
     align_corners: false
     square_pad: true
-  triplets: true
+  triplet: true
 
 model:
   name: triplet_pipeline
