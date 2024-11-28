@@ -14,6 +14,11 @@ class Unet(torch.nn.Module):
 
         size = conf.arch.kernel_size
 
+        if conf.arch.norm == "NoOp":
+            self.first_norm = get_module("InstanceNorm2d")(in_features)
+        else:
+            self.first_norm = get_module("NoOp")()
+
         down_block = get_module(conf.arch.down_block)
         up_block = get_module(conf.arch.up_block)
 
@@ -43,11 +48,13 @@ class Unet(torch.nn.Module):
 
         if input1 is not None:
             features1 = [input1]
+            features1[0] = self.first_norm(features1[0])
             for block in self.path_down:
                 features1.append(block(features1[-1]))
 
         if input2 is not None:
             features2 = [input2]
+            features2[0] = self.first_norm(features2[0])
             for block in self.path_down:
                 features2.append(block(features2[-1]))
 

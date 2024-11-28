@@ -8,7 +8,7 @@ from ...geometry.epipolar import (
     asymm_epipolar_distance_all,
     relative_pose_error,
 )
-from ...geometry.homography import homography_corner_error, warp_points_torch
+from ...geometry.homography import homography_corner_error
 from ...robust_estimators import load_estimator
 from ...settings import DATA_PATH, TRAINING_PATH
 from ..base_model import BaseModel
@@ -20,6 +20,7 @@ from ..utils.misc import (
     pad_and_stack,
     select_on_last,
     tile,
+    reproject_homography,
 )
 from ..utils.unet import Unet
 
@@ -52,27 +53,6 @@ def point_distribution(logits, budget):
     logp = proposal_logp + accept_logp
 
     return proposals, accept_mask, logp
-
-
-def reproject_homography(kpts, H, h, w, inverse):
-    kptsw = warp_points_torch(kpts, H, inverse)
-
-    valid = (
-        (0 <= kptsw[:, :, 0])
-        & (kptsw[:, :, 0] < w)
-        & (0 <= kptsw[:, :, 1])
-        & (kptsw[:, :, 1] < h)
-    )
-
-    nkpts = torch.full(
-        kpts.shape,
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
-    )
-    nkpts[valid] = kptsw[valid]
-
-    return nkpts
 
 
 def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
@@ -158,6 +138,35 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     return score0, score1
 
 
+def get_cluster_regularization(pred):
+    kpts0 = pred["keypoints0"]
+    kpts1 = pred["keypoints1"]
+
+    dist0 = torch.norm(kpts0[:, :, None, :] - kpts0[:, None, :, :], p=2, dim=-1)
+    dist1 = torch.norm(kpts1[:, :, None, :] - kpts1[:, None, :, :], p=2, dim=-1)
+
+    dist0 = (
+        dist0.diagonal_scatter(
+            torch.full_like(dist0, float("inf")).diagonal(dim1=1, dim2=2),
+            dim1=1,
+            dim2=2,
+        )
+        .min(dim=-1)
+        .values
+    )
+    dist1 = (
+        dist1.diagonal_scatter(
+            torch.full_like(dist1, float("inf")).diagonal(dim1=1, dim2=2),
+            dim1=1,
+            dim2=2,
+        )
+        .min(dim=-1)
+        .values
+    )
+
+    return torch.mean(1 / (dist0 + 1e-6), dim=-1), torch.mean(1 / (dist1 + 1e-6), dim=-1)
+
+
 class DISK(BaseModel):
     default_conf = {
         "window_size": 8,
@@ -183,11 +192,11 @@ class DISK(BaseModel):
             # "dropout": False, not used yet
             "bias": True,
             "padding": True,
-            "train_invT": False,
         },
         "loss": {
             "score_type": "coarse",
             "reward_threshold": 1.5,
+            "lm_c": 0.1,
         },
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
@@ -451,7 +460,10 @@ class DISK(BaseModel):
             elementwise_reward1 * logp1
         ).sum(dim=-1)
 
-        loss = -reinforce
+        cr = get_cluster_regularization(pred)
+        cr = cr[0] + cr[1]
+
+        loss = -reinforce + self.conf.loss.lm_c * (cr[0] + cr[1])
 
         losses = {
             "total": loss,
@@ -459,14 +471,17 @@ class DISK(BaseModel):
             "n_kpts": (
                 torch.count_nonzero(logp0, dim=-1) + torch.count_nonzero(logp1, dim=-1)
             ).float(),
+            "cr": cr,
         }
         del (
             logp0,
             logp1,
             reinforce,
             loss,
+            cr
         )
 
+        metrics = {}
         if not self.training:
             if pred["keypoints0"].shape[-2] == 0 or pred["keypoints1"].shape[-2] == 0:
                 zero = torch.zeros(

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 from ..utils.misc import cut_to_match, size_is_pow2
 
 
@@ -13,6 +14,7 @@ def get_module(classname):
 
     if cls is None:
         cls = getattr(nn, classname, None)
+
     if cls is None:
         raise AttributeError(f"Class {classname} not found...")
     else:

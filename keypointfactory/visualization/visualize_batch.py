@@ -3,9 +3,8 @@ import torch
 import matplotlib as mpl
 import matplotlib.cm as cm
 
-from ..models.extractors.diskv2 import reproject_homography
 from ..models.utils.metrics import compute_correctness
-from ..models.utils.misc import lscore
+from ..models.utils.misc import lscore, reproject_homography
 from ..utils.tensor import batch_to_device
 from .viz2d import (
     cm_ranking,

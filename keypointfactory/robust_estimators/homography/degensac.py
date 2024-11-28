@@ -1,5 +1,6 @@
 import pydegensac
 import torch
+import logging
 
 from ... import logger
 from ..base_estimator import BaseEstimator
@@ -33,13 +34,21 @@ class DegensacHomographyEstimator(BaseEstimator):
                 "inliers": torch.tensor([]).to(pts0.device),
             }
 
-        M, mask = pydegensac.findHomography(
-            pts0.squeeze(0).cpu().numpy(),
-            pts1.squeeze(0).cpu().numpy(),
-            px_th=self.conf.ransac_th,
-            conf=self.conf.options["confidence"],
-            max_iters=self.conf.options["max_iters"],
-        )
+        try:
+            M, mask = pydegensac.findHomography(
+                pts0.squeeze(0).cpu().numpy(),
+                pts1.squeeze(0).cpu().numpy(),
+                px_th=self.conf.ransac_th,
+                conf=self.conf.options["confidence"],
+                max_iters=self.conf.options["max_iters"],
+            )
+        except:
+            logger.log(logging.WARN, "Degensac failed to find a solution")
+            return {
+                "success": False,
+                "M_0to1": torch.eye(3, device=pts0.device, dtype=pts0.dtype),
+                "inliers": torch.tensor([]).to(pts0.device),
+            }
 
         if mask is None:
             logger.warning("Degensac failed to find a solution")
