@@ -164,7 +164,9 @@ def get_cluster_regularization(pred):
         .values
     )
 
-    return torch.mean(1 / (dist0 + 1e-6), dim=-1), torch.mean(1 / (dist1 + 1e-6), dim=-1)
+    return torch.sum(1 / (dist0 + 1e-6), dim=-1), torch.sum(
+        1 / (dist1 + 1e-6), dim=-1
+    )
 
 
 class DISK(BaseModel):
@@ -463,7 +465,7 @@ class DISK(BaseModel):
         cr = get_cluster_regularization(pred)
         cr = cr[0] + cr[1]
 
-        loss = -reinforce + self.conf.loss.lm_c * (cr[0] + cr[1])
+        loss = -reinforce + self.conf.loss.lm_c * cr
 
         losses = {
             "total": loss,
@@ -473,13 +475,7 @@ class DISK(BaseModel):
             ).float(),
             "cr": cr,
         }
-        del (
-            logp0,
-            logp1,
-            reinforce,
-            loss,
-            cr
-        )
+        del (logp0, logp1, reinforce, loss, cr)
 
         metrics = {}
         if not self.training:
