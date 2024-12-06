@@ -9,7 +9,7 @@ data:
   homography:
     difficulty: 0.7
     max_angle: 90
-    patch_shape: [768, 768]
+    patch_shape: [640, 480]
   photometric:
     name: lg
 
@@ -30,7 +30,7 @@ model:
     loss:
       reward_threshold: 3
       score_type: coarse
-      lm_c: 0.01
+      lm_e: 0.01
   batch_triplets: false
   enumerate_pairs: true
 
