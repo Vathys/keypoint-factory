@@ -1,20 +1,56 @@
 model:
-    name: two_view_pipeline
-    extractor:
-        name: extractors.superpoint_open
-        max_num_keypoints: 2048
-        detection_threshold: 0.0
-        nms_radius: 3
+  name: two_view_pipeline
+  extractor:
+    name: extractors.superpoint_open
+    max_num_keypoints: 4096
+    detection_threshold: 0.0
+    nms_radius: 3
 
 benchmarks:
-    hpatches:
-        eval:
-            top_k_thresholds: 2048
-            top_k_by: scores
-    megadepth1500:
-        eval: 
-            top_k_thresholds: 2048
-            top_k_by: scores
-            estimator: degensac
-            ransac_th: 1.0
-            use_depth: False
+  hpatches:
+    model:
+      name: two_view_pipeline
+    data:
+      triplet: false
+    eval:
+      top_k_thresholds: 2048
+      top_k_by: scores
+      estimator: degensac
+      ransac_th: 1.0
+      use_gt: true
+      summarize_by_scene: true
+  hpatches_transformations:
+    model:
+      name: two_view_pipeline
+    data:
+      triplet:
+    eval:
+      top_k_thresholds: 2048
+      top_k_by: scores
+      test_angles:
+        [
+          0,
+          30,
+          45,
+          60,
+          90,
+          120,
+          135,
+          150,
+          180,
+          210,
+          225,
+          240,
+          270,
+          300,
+          315,
+          330,
+        ]
+      test_scales: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
+  megadepth1500:
+    eval:
+      top_k_thresholds: 2048
+      top_k_by: scores
+      estimator: degensac
+      ransac_th: 1.0
+      use_depth: False

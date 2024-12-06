@@ -1,26 +1,58 @@
 model:
-    name: two_view_pipeline
-    extractor:
-        name: extractors.diskv2
-        max_num_keypoints: null
-        detection_threshold: 0.0
-        nms_radius: 2
-        force_num_keypoints: true
+  name: two_view_pipeline
+  extractor:
+    name: extractors.diskv2
+    max_num_keypoints: 4096
+    detection_threshold: 0.0
+    nms_radius: 2
+    force_num_keypoints: true
 
 benchmarks:
-    hpatches:
-        eval:
-            top_k_thresholds: 2048
-            top_k_by: scores
-            estimator: degensac
-            ransac_th: 1.0
-            use_gt: True
-            summarize_by_scene: True
-    megadepth1500:
-        eval:
-            top_k_thresholds: 2048
-            top_k_by: scores
-            estimator: degensac
-            ransac_th: 1.0
-            use_gt: True
-            summarize_by_scene: True
+  hpatches:
+    model:
+      name: two_view_pipeline
+    data:
+      triplet: false
+    eval:
+      top_k_thresholds: 2048
+      top_k_by: scores
+      estimator: degensac
+      ransac_th: 1.0
+      use_gt: true
+      summarize_by_scene: true
+  hpatches_transformations:
+    model:
+      name: two_view_pipeline
+    data:
+      triplet:
+    eval:
+      top_k_thresholds: 2048
+      top_k_by: scores
+      test_angles:
+        [
+          0,
+          30,
+          45,
+          60,
+          90,
+          120,
+          135,
+          150,
+          180,
+          210,
+          225,
+          240,
+          270,
+          300,
+          315,
+          330,
+        ]
+      test_scales: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
+  megadepth1500:
+    eval:
+      top_k_thresholds: 2048
+      top_k_by: scores
+      estimator: degensac
+      ransac_th: 1.0
+      use_gt: true
+      summarize_by_scene: true
