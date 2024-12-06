@@ -25,6 +25,23 @@ from ..utils.misc import (
 from ..utils.unet import Unet
 
 
+def point_distribution_disk(logits):
+    proposal_dist = torch.distributions.Categorical(logits=logits)
+    proposals = proposal_dist.sample()
+    proposal_logp = proposal_dist.log_prob(proposals)
+
+    accept_logits = select_on_last(logits, proposals).squeeze(-1)
+
+    accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
+    accept_samples = accept_dist.sample()
+    accept_logp = accept_dist.log_prob(accept_samples)
+    accept_mask = accept_samples == 1
+
+    logp = proposal_logp + accept_logp
+
+    return proposals, accept_mask, logp
+
+
 def point_distribution(logits, budget):
     proposal_dist = torch.distributions.Categorical(logits=logits)
     proposals = proposal_dist.sample()
@@ -272,9 +289,12 @@ class DISK(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(
-            tiled, self.conf.sample_budget
-        )
+        if self.conf.sample_budget is None:
+            proposals, accept_mask, logp = point_distribution_disk(tiled)
+        else:
+            proposals, accept_mask, logp = point_distribution(
+                tiled, self.conf.sample_budget
+            )
 
         cgrid = torch.stack(
             torch.meshgrid(
