@@ -40,7 +40,7 @@ def sample_homography(img, conf: dict, size: list):
     data["image"] = cv2.warpPerspective(img, H, tuple(size))
     data["H_"] = H.astype(np.float32)
     data["coords"] = coords.astype(np.float32)
-    data["image_size"] = np.array(size, dtype=np.float32)
+    data["image_size"] = np.array(size[::-1], dtype=np.float32)
     return data
 
 
