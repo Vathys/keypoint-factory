@@ -53,10 +53,12 @@ train:
   plot:
     [5, "keypointfactory.visualization.visualize_batch.make_keypoint_figures"]
   substep: 1
-  warmup: 0
+  warmup: null
 
 benchmarks:
   hpatches:
+    model:
+      name: triplet_pipeline
     data:
       num_workers: 10
     eval:

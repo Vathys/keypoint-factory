@@ -164,7 +164,7 @@ def get_cluster_regularization(pred):
         .values
     )
 
-    return torch.sum(1 / (dist0 + 1e-6), dim=-1), torch.sum(
+    return torch.mean(1 / (dist0 + 1e-6), dim=-1), torch.mean(
         1 / (dist1 + 1e-6), dim=-1
     )
 
@@ -353,6 +353,12 @@ class DISK(BaseModel):
 
     def _forward(self, data):
         def process_heatmap(heatmap, image_size):
+            heatmap[:, :, : self.conf.pad_edges, :] = 0
+            heatmap[:, :, :, : self.conf.pad_edges] = 0
+            for i in range(heatmap.shape[0]):
+                h, w = image_size[i].long()
+                heatmap[:, :, h.item() - self.conf.pad_edges :, :] = 0
+                heatmap[:, :, :, w.item() - self.conf.pad_edges :] = 0
             if self.training:
                 # Use sampling during training
                 points, logps = self._sample(heatmap)
@@ -371,16 +377,6 @@ class DISK(BaseModel):
 
                     point = point[mask]
                     logp = logp[mask]
-
-                if self.conf.pad_edges > 0:
-                    image_shape = image_size[i]
-                    vis = torch.all(
-                        (point > self.conf.pad_edges)
-                        & (point < image_shape - self.conf.pad_edges),
-                        dim=-1,
-                    )
-                    point = point[vis]
-                    logp = logp[vis]
 
                 x, y = point.T
 
@@ -434,16 +430,15 @@ class DISK(BaseModel):
                 data,
                 pred,
                 threshold=self.conf.loss.reward_threshold,
-                lm_tp=self.lm_tp,
-                lm_fp=self.lm_fp,
+                score_type=self.conf.loss.score_type,
+                lm_e=self.conf.loss.lm_e,
             )
         elif self.conf.reward == "epipolar":
             elementwise_reward0, elementwise_reward1 = epipolar_reward(
                 data,
                 pred,
                 threshold=self.conf.loss.reward_threshold,
-                lm_tp=self.lm_tp,
-                lm_fp=self.lm_fp,
+                score_type=self.conf.loss.score_type,
             )
         elif self.conf.reward == "homography":
             elementwise_reward0, elementwise_reward1 = homography_reward(
@@ -462,10 +457,7 @@ class DISK(BaseModel):
             elementwise_reward1 * logp1
         ).sum(dim=-1)
 
-        cr = get_cluster_regularization(pred)
-        cr = cr[0] + cr[1]
-
-        loss = -reinforce + self.conf.loss.lm_c * cr
+        loss = -reinforce
 
         losses = {
             "total": loss,
@@ -473,9 +465,8 @@ class DISK(BaseModel):
             "n_kpts": (
                 torch.count_nonzero(logp0, dim=-1) + torch.count_nonzero(logp1, dim=-1)
             ).float(),
-            "cr": cr,
         }
-        del (logp0, logp1, reinforce, loss, cr)
+        del (logp0, logp1, reinforce, loss)
 
         metrics = {}
         if not self.training:
@@ -640,18 +631,10 @@ class DISK(BaseModel):
                 }
 
                 if "depth" in data["view0"]:
-                    desc_matches = self.val_matcher.match_by_descriptors(pred)
                     depth_matches = self.val_matcher.match_by_depth(data, pred)
                     kpts0 = pred["keypoints0"]
                     kpts1 = pred["keypoints1"]
 
-                    desc_metrics = get_match_metrics(
-                        kpts0,
-                        kpts1,
-                        data["T_0to1"],
-                        desc_matches,
-                        estimate="relpose",
-                    )
                     depth_metrics = get_match_metrics(
                         kpts0,
                         kpts1,
@@ -662,7 +645,6 @@ class DISK(BaseModel):
 
                     metrics = {
                         **metrics,
-                        **{"desc_" + k: v for k, v in desc_metrics.items()},
                         **{"depth_" + k: v for k, v in depth_metrics.items()},
                     }
                 else:

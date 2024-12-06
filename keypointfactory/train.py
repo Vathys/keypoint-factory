@@ -124,7 +124,7 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
                     results[k + f"_recall{int(q)}"] = RecallMetric(q)
                 if k in conf.auc_metrics.keys():
                     ths = OmegaConf.to_object(conf.auc_metrics[k])
-                    results[k + "_auc"] = AUCMetric(thresholds=ths)
+                    results[k + "_maa"] = AUCMetric(thresholds=ths, return_mean=True)
             results[k].update(v)
             if k in conf.median_metrics:
                 results[k + "_median"].update(v)
@@ -132,7 +132,7 @@ def do_evaluation(model, loader, device, loss_fn, conf, pbar=True):
                 q = conf.recall_metrics[k]
                 results[k + f"_recall{int(q)}"].update(v)
             if k in conf.auc_metrics.keys():
-                results[k + "_auc"].update(v)
+                results[k + "_maa"].update(v)
         del numbers
     results = {k: results[k].compute() for k in results}
     return results, {k: v.compute() for k, v in pr_metrics.items()}, figures
@@ -483,7 +483,6 @@ def training(rank, conf, output_dir, args):
 
                 torch.autograd.backward(leaves, grads, retain_graph=True)
                 del leaves, grads
-                
 
                 if it % substep_ == substep_ - 1:
                     if args.detect_anomaly:
@@ -518,6 +517,8 @@ def training(rank, conf, output_dir, args):
                 else:
                     if rank == 0:
                         logger.warning(f"Skip iteration {it} due to detach.")
+            else:
+                logger.warning("No gradient found")
 
             if args.profile:
                 prof.step()

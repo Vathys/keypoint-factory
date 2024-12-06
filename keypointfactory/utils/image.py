@@ -52,7 +52,7 @@ class ImagePreprocessor:
 
         data = {
             "scales": scale,
-            "image_size": np.array(size[::-1]),
+            "image_size": np.array([size[0], size[1]]),
             "transform": T,
             "original_image_size": np.array([w, h]),
         }
