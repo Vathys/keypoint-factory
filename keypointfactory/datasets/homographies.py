@@ -238,7 +238,7 @@ class _Dataset(torch.utils.data.Dataset):
             logging.warning("Image %s could not be read.", name)
             img = np.zeros((1024, 1024) + (() if self.conf.grayscale else (3,)))
         img = img.astype(np.float32) / 255.0
-        size = img.shape[:2][::-1]
+        size = img.shape[:2]
         ps = self.conf.homography.patch_shape
 
         left_conf = omegaconf.OmegaConf.to_container(self.conf.homography)
