@@ -197,7 +197,7 @@ class DISK(BaseModel):
         "detection_threshold": 0.005,
         "weights": None,
         "reward": "depth",
-        "pad_edges": 4,
+        "pad_edges": 1,
         "arch": {
             "kernel_size": 5,
             "gate": "PReLU",
@@ -215,7 +215,7 @@ class DISK(BaseModel):
         "loss": {
             "score_type": "coarse",
             "reward_threshold": 1.5,
-            "lm_c": 0.1,
+            "lm_e": 0.1,
         },
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
