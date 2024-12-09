@@ -40,12 +40,8 @@ def make_reward_figures(pred_, data_, n_pairs=2):
 
         H_0to1 = data["H_0to1"]
 
-        kpts0_r = reproject_homography(
-            kp0, H_0to1, *data["view1"]["image"].shape[2:], False
-        )
-        kpts1_r = reproject_homography(
-            kp1, H_0to1, *data["view0"]["image"].shape[2:], True
-        )
+        kpts0_r = reproject_homography(kp0, H_0to1, data["view1"]["image_size"], False)
+        kpts1_r = reproject_homography(kp1, H_0to1, data["view0"]["image_size"], True)
 
         diff0 = kp0[:, :, None, :] - kpts1_r[:, None, :, :]
         diff1 = kp1[:, None, :, :] - kpts0_r[:, :, None, :]
