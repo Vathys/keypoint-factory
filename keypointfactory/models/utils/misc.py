@@ -204,25 +204,25 @@ def distance_matrix(fs1, fs2):
     return 1.414213 * (1.0 - dist).clamp(min=1e-6).sqrt()
 
 
-def reproject_homography(kpts, H, h, w, inverse):
+def reproject_homography(kpts, H, image_size, inverse):
     kptsw = warp_points_torch(kpts, H, inverse)
 
-    valid = (
-        (0 <= kptsw[:, :, 0])
-        & (kptsw[:, :, 0] < w)
-        & (0 <= kptsw[:, :, 1])
-        & (kptsw[:, :, 1] < h)
+    valid = torch.zeros(
+        kpts.shape[0], kpts.shape[1], dtype=torch.bool, device=kpts.device
     )
+    for b in range(kpts.shape[0]):
+        valid[b] = (
+            (0 <= kptsw[b, :, 0])
+            & (kptsw[b, :, 0] < image_size[b, 1])
+            & (0 <= kptsw[b, :, 1])
+            & (kptsw[b, :, 1] < image_size[b, 0])
+        )
 
-    nkpts = torch.full(
-        kpts.shape,
-        fill_value=float("NaN"),
-        device=kpts.device,
-        dtype=kpts.dtype,
+    kptsw.masked_scatter_(
+        ~valid[:, :, None].expand(-1, -1, 2),
+        torch.full_like(kptsw, float("NaN"), device=kptsw.device),
     )
-    nkpts[valid] = kptsw[valid]
-
-    return nkpts
+    return kptsw
 
 
 class CycleMatcher:
@@ -236,11 +236,9 @@ class CycleMatcher:
         H_0to1 = data["H_0to1"]
 
         kpts0_r = reproject_homography(
-            kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
+            kpts0, H_0to1, data["view1"]["image_size"], False
         )
-        kpts1_r = reproject_homography(
-            kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
-        )
+        kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -432,12 +430,8 @@ def classify_by_homography(data, pred, threshold=2.0):
 
     H_0to1 = data["H_0to1"]
 
-    kpts0_r = reproject_homography(
-        kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
-    )
-    kpts1_r = reproject_homography(
-        kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
-    )
+    kpts0_r = reproject_homography(kpts0, H_0to1, data["view1"]["image_size"], False)
+    kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]

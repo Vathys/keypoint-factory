@@ -133,12 +133,8 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
 
     H_0to1 = data["H_0to1"]
 
-    kpts0_r = reproject_homography(
-        kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
-    )
-    kpts1_r = reproject_homography(
-        kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
-    )
+    kpts0_r = reproject_homography(kpts0, H_0to1, data["view1"]["image_size"], False)
+    kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
 
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
     diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
