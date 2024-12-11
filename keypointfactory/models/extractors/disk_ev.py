@@ -25,40 +25,22 @@ from ..utils.misc import (
     classify_by_epipolar,
     classify_by_homography,
 )
-from ...utils.misc import get_twoview
 from ... import logger
 
 
-def point_distribution(logits, budget=-1):
+def point_distribution(logits):
     proposal_dist = torch.distributions.Categorical(logits=logits)
     proposals = proposal_dist.sample()
     proposal_logp = proposal_dist.log_prob(proposals)
 
     accept_logits = select_on_last(logits, proposals).squeeze(-1)
 
-    if budget != -1:
-        b, tiled_h, tiled_w = accept_logits.shape
+    accept_dist = torch.distributions.Bernoulli(logits=accept_logits)
+    accept_samples = accept_dist.sample()
+    accept_logp = accept_dist.log_prob(accept_samples)
+    accept_mask = accept_samples == 1
 
-        flat_logits = accept_logits.reshape(b, -1)
-
-        gumbel_dist = torch.distributions.Gumbel(0, 1)
-        gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(
-            logits.device
-        )
-        topk_indices = torch.topk(gumbel_scores, budget, dim=-1).indices
-
-        accept_samples = torch.zeros_like(flat_logits)
-        accept_samples.scatter_(-1, topk_indices, 1)
-        accept_samples = accept_samples.reshape(b, tiled_h, tiled_w)
-
-        accept_mask = accept_samples == 1
-
-        accept_logp = torch.log_softmax(accept_logits, dim=-1)
-        accept_logp = accept_logp.reshape(b, tiled_h, tiled_w)
-        logp = proposal_logp + accept_logp
-    else:
-        accept_mask = torch.ones_like(accept_logits, dtype=torch.bool)
-        logp = proposal_logp
+    logp = proposal_logp + accept_logp
 
     return proposals, accept_mask, logp
 
@@ -141,23 +123,11 @@ class ConsistentMatcher(torch.nn.Module):
 
 
 def depth_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
-    kpts0, kpts1, kpts2 = pred["keypoints0"], pred["keypoints1"], pred["keypoints2"]
+    kpts0, kpts1 = pred["keypoints0"], pred["keypoints1"]
 
-    depth0, depth1, depth2 = (
-        data["view0"]["depth"],
-        data["view1"]["depth"],
-        data["view2"]["depth"],
-    )
-    camera0, camera1, camera2 = (
-        data["view0"]["camera"],
-        data["view1"]["camera"],
-        data["view2"]["camera"],
-    )
-    T0, T1, T2 = (
-        data["view0"]["T_w2cam"],
-        data["view1"]["T_w2cam"],
-        data["view2"]["T_w2cam"],
-    )
+    depth0, depth1 = data["view0"]["depth"], data["view1"]["depth"]
+    camera0, camera1 = data["view0"]["camera"], data["view1"]["camera"]
+    T0, T1 = data["view0"]["T_w2cam"], data["view1"]["T_w2cam"]
 
     def get_score(kpts, kpts_o, T, T_o, cam, cam_o, depth_o):
         kpts_r = simple_project(unproject(kpts_o, depth_o, cam_o, T_o), cam, T)
@@ -171,33 +141,17 @@ def depth_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
         return lscore(reproj_error, threshold, score_type, rescale=True)
 
     error1_0 = get_score(kpts0, kpts1, T0, T1, camera0, camera1, depth1)
-    error2_0 = get_score(kpts0, kpts2, T0, T2, camera0, camera2, depth2)
     error0_1 = get_score(kpts1, kpts0, T1, T0, camera1, camera0, depth0)
-    error2_1 = get_score(kpts1, kpts2, T1, T2, camera1, camera2, depth2)
-    error0_2 = get_score(kpts2, kpts0, T2, T0, camera2, camera0, depth0)
-    error1_2 = get_score(kpts2, kpts1, T2, T1, camera2, camera1, depth1)
 
-    ereward0, ereward1, ereward2 = epipolar_reward(data, pred, threshold, score_type)
+    ereward = epipolar_reward(data, pred, threshold, score_type)
 
-    # reward0 = and_mult(error1_0, error2_0, rescale=True) + lm_e * ereward0
-    # reward1 = and_mult(error0_1, error2_1, rescale=True) + lm_e * ereward1
-    # reward2 = and_mult(error0_2, error1_2, rescale=True) + lm_e * ereward2
-
-    reward0 = (error1_0 + error2_0) * 0.5 + lm_e * ereward0
-    reward1 = (error0_1 + error2_1) * 0.5 + lm_e * ereward1
-    reward2 = (error0_2 + error1_2) * 0.5 + lm_e * ereward2
-
-    return {"reward0": reward0, "reward1": reward1, "reward2": reward2}
+    return error1_0 * error0_1 + lm_e * ereward
 
 
 def epipolar_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
-    kpts0, kpts1, kpts2 = pred["keypoints0"], pred["keypoints1"], pred["keypoints2"]
+    kpts0, kpts1 = pred["keypoints0"], pred["keypoints1"]
 
-    camera0, camera1, camera2 = (
-        data["view0"]["camera"],
-        data["view1"]["camera"],
-        data["view2"]["camera"],
-    )
+    camera0, camera1 = data["view0"]["camera"], data["view1"]["camera"]
 
     def get_score(kpts, kpts_o, camera, camera_o, T):
         F = T_to_F(camera, camera_o, T)
@@ -209,21 +163,9 @@ def epipolar_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
         return lscore(reproj_error, threshold, score_type, rescale=True)
 
     error1_0 = get_score(kpts0, kpts1, camera0, camera1, data["T_0to1"])
-    error2_0 = get_score(kpts0, kpts2, camera0, camera2, data["T_0to2"])
     error0_1 = get_score(kpts1, kpts0, camera1, camera0, data["T_1to0"])
-    error2_1 = get_score(kpts1, kpts2, camera1, camera2, data["T_1to2"])
-    error0_2 = get_score(kpts2, kpts0, camera2, camera0, data["T_2to0"])
-    error1_2 = get_score(kpts2, kpts1, camera2, camera1, data["T_2to1"])
 
-    # reward0 = and_mult(error1_0, error2_0, rescale=True)
-    # reward1 = and_mult(error0_1, error2_1, rescale=True)
-    # reward2 = and_mult(error0_2, error1_2, rescale=True)
-
-    reward0 = (error1_0 + error2_0) * 0.5
-    reward1 = (error0_1 + error2_1) * 0.5
-    reward2 = (error0_2 + error1_2) * 0.5
-
-    return {"reward0": reward0, "reward1": reward1, "reward2": reward2}
+    return error1_0 * error0_1
 
 
 def homography_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
@@ -232,12 +174,8 @@ def homography_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
 
     H_0to1 = data["H_0to1"]
 
-    kpts0_r = reproject_homography(
-        kpts0, H_0to1, *data["view1"]["image"].shape[2:], False
-    )
-    kpts1_r = reproject_homography(
-        kpts1, H_0to1, *data["view0"]["image"].shape[2:], True
-    )
+    kpts0_r = reproject_homography(kpts0, H_0to1, data["view1"]["image_size"], False)
+    kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -245,10 +183,9 @@ def homography_reward(data, pred, threshold=3, score_type="linear", lm_e=0.25):
     close0 = torch.norm(diff0, p=2, dim=-1)
     close1 = torch.norm(diff1, p=2, dim=-1)
 
-    return (
-        lscore(close0, threshold, score_type, rescale=True)
-        + lscore(close1, threshold, score_type, rescale=True)
-    ) / 2
+    return lscore(close0, threshold, score_type, rescale=True) * lscore(
+        close1, threshold, score_type, rescale=True
+    )
 
 
 class DISK_EV(BaseModel):
@@ -355,9 +292,7 @@ class DISK_EV(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        proposals, accept_mask, logp = point_distribution(
-            tiled, self.conf.sample_budget
-        )
+        proposals, accept_mask, logp = point_distribution(tiled)
 
         cgrid = torch.stack(
             torch.meshgrid(
@@ -444,6 +379,13 @@ class DISK_EV(BaseModel):
 
     def _forward(self, data):
         def process_heatmap(heatmap, descs, image_size):
+            heatmap[:, :, : self.conf.pad_edges, :] = 0
+            heatmap[:, :, :, : self.conf.pad_edges] = 0
+            for i in range(heatmap.shape[0]):
+                h, w = image_size[i].long()
+                heatmap[:, :, h.item() - self.conf.pad_edges :, :] = 0
+                heatmap[:, :, :, w.item() - self.conf.pad_edges :] = 0
+
             if self.training:
                 # Use sampling during training
                 points, logps = self._sample(heatmap)
@@ -463,16 +405,6 @@ class DISK_EV(BaseModel):
 
                     point = point[mask]
                     logp = logp[mask]
-
-                if self.conf.pad_edges > 0:
-                    image_shape = image_size[i]
-                    vis = torch.all(
-                        (point > self.conf.pad_edges)
-                        & (point < image_shape - self.conf.pad_edges),
-                        dim=-1,
-                    )
-                    point = point[vis]
-                    logp = logp[vis]
 
                 x, y = point.T
                 desc = descs[i][:, y, x].T
