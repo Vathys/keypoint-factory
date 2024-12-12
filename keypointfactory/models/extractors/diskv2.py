@@ -57,6 +57,8 @@ def point_distribution(logits, budget):
     gumbel_scores = flat_logits + gumbel_dist.sample(flat_logits.shape).to(
         logits.device
     )
+    if budget > flat_logits.shape[-1]:
+        budget = flat_logits.shape[-1]
     topk_indices = torch.topk(gumbel_scores, budget, dim=-1).indices
 
     accept_samples = torch.zeros_like(flat_logits)
@@ -73,25 +75,28 @@ def point_distribution(logits, budget):
 
 
 def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
-    kpts0 = pred["keypoints0"]
-    kpts1 = pred["keypoints1"]
+    # kpts0 = pred["keypoints0"]
+    # kpts1 = pred["keypoints1"]
 
-    camera0 = data["view0"]["camera"]
-    camera1 = data["view1"]["camera"]
+    # camera0 = data["view0"]["camera"]
+    # camera1 = data["view1"]["camera"]
 
-    F0_1 = T_to_F(camera0, camera1, data["T_0to1"])
-    F1_0 = T_to_F(camera1, camera0, data["T_1to0"])
+    # E0_1 = T_to_E(data["T_0to1"])
+    # E1_0 = T_to_E(data["T_1to0"])
+    # F0_1 = T_to_F(camera0, camera1, data["T_0to1"])
+    # F1_0 = T_to_F(camera1, camera0, data["T_1to0"])
 
-    dist0 = asymm_epipolar_distance_all(kpts0, kpts1, F0_1).abs()
-    dist1 = asymm_epipolar_distance_all(kpts1, kpts0, F1_0).abs()
+    # dist0 = asymm_epipolar_distance_all(kpts0, kpts1, F0_1).abs() ** 2
+    # dist1 = asymm_epipolar_distance_all(kpts1, kpts0, F1_0).abs() ** 2
 
-    reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
-    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
+    # edist_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
+    # edist_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
-    score0 = lscore(reproj_error0, threshold, type=score_type)
-    score1 = lscore(reproj_error1, threshold, type=score_type)
+    # score0 = lscore(edist_error0, threshold, type=score_type)
+    # score1 = lscore(edist_error1, threshold, type=score_type)
 
-    return score0, score1
+    # return score0, score1
+    raise NotImplementedError("Need to check validity")
 
 
 def depth_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
@@ -119,10 +124,10 @@ def depth_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
     reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
-    escore0, escore1 = epipolar_reward(data, pred, threshold, score_type, lm_e)
+    # escore0, escore1 = epipolar_reward(data, pred, threshold, score_type, lm_e)
 
-    score0 = lscore(reproj_error0, threshold, type=score_type) + lm_e * escore0
-    score1 = lscore(reproj_error1, threshold, type=score_type) + lm_e * escore1
+    score0 = lscore(reproj_error0, threshold, type=score_type)
+    score1 = lscore(reproj_error1, threshold, type=score_type)
 
     return score0, score1
 
@@ -151,37 +156,6 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     return score0, score1
 
 
-def get_cluster_regularization(pred):
-    kpts0 = pred["keypoints0"]
-    kpts1 = pred["keypoints1"]
-
-    dist0 = torch.norm(kpts0[:, :, None, :] - kpts0[:, None, :, :], p=2, dim=-1)
-    dist1 = torch.norm(kpts1[:, :, None, :] - kpts1[:, None, :, :], p=2, dim=-1)
-
-    dist0 = (
-        dist0.diagonal_scatter(
-            torch.full_like(dist0, float("inf")).diagonal(dim1=1, dim2=2),
-            dim1=1,
-            dim2=2,
-        )
-        .min(dim=-1)
-        .values
-    )
-    dist1 = (
-        dist1.diagonal_scatter(
-            torch.full_like(dist1, float("inf")).diagonal(dim1=1, dim2=2),
-            dim1=1,
-            dim2=2,
-        )
-        .min(dim=-1)
-        .values
-    )
-
-    return torch.mean(1 / (dist0 + 1e-6), dim=-1), torch.mean(
-        1 / (dist1 + 1e-6), dim=-1
-    )
-
-
 class DISK(BaseModel):
     default_conf = {
         "window_size": 8,
@@ -193,7 +167,7 @@ class DISK(BaseModel):
         "detection_threshold": 0.005,
         "weights": None,
         "reward": "depth",
-        "pad_edges": 1,
+        "pad_edges": 4,
         "arch": {
             "kernel_size": 5,
             "gate": "PReLU",
@@ -213,6 +187,7 @@ class DISK(BaseModel):
             "reward_threshold": 1.5,
             "lm_e": 0.1,
         },
+        "eval_sampling": "nms",
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
@@ -275,7 +250,7 @@ class DISK(BaseModel):
 
         self.val_matcher = CycleMatcher(self.conf.loss.reward_threshold)
 
-    def _sample(self, heatmaps):
+    def _sample(self, heatmaps, budget_override=None, nms=False):
         v = self.conf.window_size
         device = heatmaps.device
         b, _, h, w = heatmaps.shape
@@ -285,12 +260,14 @@ class DISK(BaseModel):
 
         tiled = tile(heatmaps, self.conf.window_size).squeeze(1)
 
-        if self.conf.sample_budget is None:
+        budget = (
+            budget_override if budget_override is not None else self.conf.sample_budget
+        )
+
+        if budget is None:
             proposals, accept_mask, logp = point_distribution_disk(tiled)
         else:
-            proposals, accept_mask, logp = point_distribution(
-                tiled, self.conf.sample_budget
-            )
+            proposals, accept_mask, logp = point_distribution(tiled, budget)
 
         cgrid = torch.stack(
             torch.meshgrid(
@@ -312,9 +289,19 @@ class DISK(BaseModel):
             keypoints.append(xys[i][accept_mask[i]])
             scores.append(logp[i][accept_mask[i]])
 
+        if nms:
+            updated_heatmaps = torch.full_like(heatmaps, -float("inf"))
+
+            for i in range(b):
+                updated_heatmaps[i, 0, keypoints[i][:, 1], keypoints[i][:, 0]] = scores[
+                    i
+                ]
+
+            keypoints, scores = self._nms(updated_heatmaps, -float("inf"))
+
         return keypoints, scores
 
-    def _nms(self, heatmaps):
+    def _nms(self, heatmaps, detection_threshold=None):
         heatmaps = heatmaps.squeeze(1)
 
         ixs = torch.nn.functional.max_pool2d(
@@ -329,8 +316,8 @@ class DISK(BaseModel):
         coords = torch.arange(h * w, device=heatmaps.device).reshape(1, h, w)
         nms = ixs == coords
 
-        if self.conf.detection_threshold is not None:
-            nms = nms & (heatmaps > self.conf.detection_threshold)
+        if detection_threshold is not None:
+            nms = nms & (heatmaps > detection_threshold)
 
         keypoints = []
         scores = []
@@ -375,18 +362,30 @@ class DISK(BaseModel):
                 h, w = image_size[i].long()
                 heatmap[:, :, h.item() - self.conf.pad_edges :, :] = 0
                 heatmap[:, :, :, w.item() - self.conf.pad_edges :] = 0
+
+            disable_filter = False
             if self.training:
                 # Use sampling during training
-                points, logps = self._sample(heatmap)
+                points, logps = self._sample(heatmap, nms=False)
             else:
-                # Use NMS during evaluation
-                points, logps = self._nms(heatmap)
+                if self.conf.eval_sampling == "nms":
+                    # Use NMS during evaluation
+                    points, logps = self._nms(heatmap, 0.0)
+                    disable_filter = False
+                elif self.conf.eval_sampling == "budget":
+                    points, logps = self._sample(
+                        heatmap, self.conf.max_num_keypoints, nms=True
+                    )
+                    disable_filter = True
+                elif self.conf.eval_sampling == "disk":
+                    points, logps = self._sample(heatmap, -1, nms=False)
+                    disable_filter = False
 
             keypoints = []
             scores = []
 
             for i, (point, logp) in enumerate(zip(points, logps)):
-                if self.conf.max_num_keypoints is not None:
+                if not disable_filter and self.conf.max_num_keypoints is not None:
                     n = min(self.conf.max_num_keypoints + 1, logp.numel())
                     minus_threshold, _ = torch.kthvalue(-logp, n)
                     mask = logp > -minus_threshold
@@ -408,7 +407,9 @@ class DISK(BaseModel):
                     -2,
                     mode="zeros",
                 )
-                scores = pad_and_stack(scores, target_length, -1, mode="zeros")
+                scores = pad_and_stack(
+                    scores, target_length, -1, mode="constant", constant=-float("inf")
+                )
             else:
                 keypoints = torch.stack(keypoints, 0)
                 scores = torch.stack(scores, 0)

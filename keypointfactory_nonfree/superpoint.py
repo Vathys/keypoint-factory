@@ -246,7 +246,7 @@ class SuperPoint(BaseModel):
                 scores[:, :, : self.conf.remove_borders] = -1
                 if "image_size" in data:
                     for i in range(scores.shape[0]):
-                        w, h = data["image_size"][i]
+                        h, w = data["image_size"][i]
                         scores[i, int(h.item()) - self.conf.remove_borders :] = -1
                         scores[i, :, int(w.item()) - self.conf.remove_borders :] = -1
                 else:

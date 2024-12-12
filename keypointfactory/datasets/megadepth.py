@@ -314,7 +314,7 @@ class _PairDataset(torch.utils.data.Dataset):
                 # ang = np.deg2rad(k * 90.)
                 kpts = features["keypoints"].copy()
                 x, y = kpts[:, 0].copy(), kpts[:, 1].copy()
-                w, h = data["image_size"]
+                h, w = data["image_size"]
                 if k == 1:
                     kpts[:, 0] = w - y
                     kpts[:, 1] = x
@@ -356,6 +356,7 @@ class _PairDataset(torch.utils.data.Dataset):
             assert self.conf.views == 1
             scene, idx0 = self.items[idx]
             data = self._read_view(scene, idx0)
+            data = {"view0": data}
         data["scene"] = scene
         data["idx"] = idx
         return data

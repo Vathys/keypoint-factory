@@ -124,7 +124,7 @@ class DKD(nn.Module):
         nms_scores[:, :, :, : self.radius] = 0
         if image_size is not None:
             for i in range(scores_map.shape[0]):
-                w, h = image_size[i].long()
+                h, w = image_size[i].long()
                 nms_scores[i, :, h.item() - self.radius :, :] = 0
                 nms_scores[i, :, :, w.item() - self.radius :] = 0
         else:

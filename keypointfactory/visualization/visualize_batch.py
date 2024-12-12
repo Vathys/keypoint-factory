@@ -183,8 +183,8 @@ def make_hm_plot(pred_, data_, n_pairs=2):
 def make_keypoint_figures(pred_, data_, n_pairs=2):
     res = {
         **make_hm_plot(pred_, data_, n_pairs),
-        **make_correct_figures(pred_, data_, n_pairs),
-        **make_reward_figures(pred_, data_, n_pairs),
+        # **make_correct_figures(pred_, data_, n_pairs),
+        # **make_reward_figures(pred_, data_, n_pairs),
         **make_score_figures(pred_, data_, n_pairs),
     }
     return res
