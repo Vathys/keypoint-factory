@@ -186,9 +186,42 @@ class ThinDownBlock(nn.Module):
         )
         self.sequence = nn.Sequential(*sequence_list)
 
+        if in_ == out_:
+            self.shortcut = NoOp()
+        else:
+            self.shortcut = nn.Conv2d(in_, out_, 1, bias=False)
+
     def forward(self, x):
         x = self.downsample(x)
         return self.sequence(x)
+
+
+class ThinResDownBlock(nn.Module):
+    def __init__(self, in_, out_, size, name=None, is_first=False, conf=None):
+        super(ThinDownBlock, self).__init__()
+
+        self.name = name
+        if conf.arch.padding:
+            padding_size = size // 2
+        else:
+            padding_size = 0
+
+        sequence_list = []
+        if is_first:
+            self.downsample = NoOp()
+        else:
+            self.downsample = get_module(conf.arch.downsample)(in_, size, conf=conf)
+            sequence_list.append(get_module(conf.arch.norm)(in_))
+            sequence_list.append(get_module(conf.arch.gate)(in_))
+
+        sequence_list.append(
+            nn.Conv2d(in_, out_, size, padding=padding_size, bias=conf.arch.bias)
+        )
+        self.sequence = nn.Sequential(*sequence_list)
+
+    def forward(self, x):
+        x = self.downsample(x)
+        return self.sequence(x) + self.shortcut(x)
 
 
 class UpBlock(nn.Module):
@@ -335,6 +368,42 @@ class ThinUpBlock(torch.nn.Module):
         combined = torch.cat([up_bot, horizontal], dim=1)
 
         return self.sequence(combined)
+
+
+class ThinResUpBlock(torch.nn.Module):
+    def __init__(self, bottom_, horizontal_, out_, size, name=None, conf=None):
+        super(ThinUpBlock, self).__init__()
+
+        self.name = name
+        if conf.arch.padding:
+            padding_size = size // 2
+        else:
+            padding_size = 0
+
+        self.upsample = get_module(conf.arch.upsample)(bottom_, size, conf=conf)
+        cat_ = bottom_ + horizontal_
+
+        sequence_list = []
+        sequence_list.append(get_module(conf.arch.norm)(cat_))
+        sequence_list.append(get_module(conf.arch.gate)(cat_))
+        sequence_list.append(
+            nn.Conv2d(cat_, out_, size, padding=padding_size, bias=conf.arch.bias)
+        )
+        self.sequence = nn.Sequential(*sequence_list)
+
+        if cat_ == out_:
+            self.shortcut = NoOp()
+        else:
+            self.shortcut = nn.Conv2d(cat_, out_, 1, bias=False)
+
+    def forward(
+        self, bottom, horizontal, attn_bottom=None
+    ):  # attn_bottom is not used; included for compatibility
+        up_bot = self.upsample(bottom)
+        horizontal = cut_to_match(up_bot, horizontal, n_pref=2)
+        combined = torch.cat([up_bot, horizontal], dim=1)
+
+        return self.sequence(combined) + self.shortcut(combined)
 
 
 class AttentionUpBlock(nn.Module):
