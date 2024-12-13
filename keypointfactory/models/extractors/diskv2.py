@@ -164,7 +164,6 @@ class DISK(BaseModel):
         "sample_budget": 4096,
         "force_num_keypoints": False,
         "pad_if_not_divisible": True,
-        "detection_threshold": 0.005,
         "weights": None,
         "reward": "depth",
         "pad_edges": 4,
@@ -407,9 +406,7 @@ class DISK(BaseModel):
                     -2,
                     mode="zeros",
                 )
-                scores = pad_and_stack(
-                    scores, target_length, -1, mode="constant", constant=-float("inf")
-                )
+                scores = pad_and_stack(scores, target_length, -1, mode="zeros")
             else:
                 keypoints = torch.stack(keypoints, 0)
                 scores = torch.stack(scores, 0)
