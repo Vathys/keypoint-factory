@@ -378,7 +378,7 @@ class DISK(BaseModel):
                     )
                     disable_filter = True
                 elif self.conf.eval_sampling == "disk":
-                    points, logps = self._sample(heatmap, -1, nms=False)
+                    points, logps = self._sample(heatmap, budget_override=-1, nms=False)
                     disable_filter = False
 
             keypoints = []
@@ -392,6 +392,16 @@ class DISK(BaseModel):
 
                     point = point[mask]
                     logp = logp[mask]
+
+                # filter points outside of image_shape
+                image_shape = image_size[i].flip(dims=(0,))
+                padding = 0 if self.conf.pad_edges is None else self.conf.pad_edges
+                vis = torch.all(
+                    (point > padding) & (point < image_shape - padding),
+                    dim=-1,
+                )
+                point = point[vis]
+                logp = logp[vis]
 
                 x, y = point.T
 
