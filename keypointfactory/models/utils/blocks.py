@@ -198,7 +198,7 @@ class ThinDownBlock(nn.Module):
 
 class ThinResDownBlock(nn.Module):
     def __init__(self, in_, out_, size, name=None, is_first=False, conf=None):
-        super(ThinDownBlock, self).__init__()
+        super(ThinResDownBlock, self).__init__()
 
         self.name = name
         if conf.arch.padding:
@@ -372,7 +372,7 @@ class ThinUpBlock(torch.nn.Module):
 
 class ThinResUpBlock(torch.nn.Module):
     def __init__(self, bottom_, horizontal_, out_, size, name=None, conf=None):
-        super(ThinUpBlock, self).__init__()
+        super(ThinResUpBlock, self).__init__()
 
         self.name = name
         if conf.arch.padding:
