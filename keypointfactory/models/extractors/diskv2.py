@@ -359,8 +359,8 @@ class DISK(BaseModel):
             heatmap[:, :, :, : self.conf.pad_edges] = 0
             for i in range(heatmap.shape[0]):
                 h, w = image_size[i].long()
-                heatmap[:, :, h.item() - self.conf.pad_edges :, :] = 0
-                heatmap[:, :, :, w.item() - self.conf.pad_edges :] = 0
+                heatmap[i, :, h.item() - self.conf.pad_edges :, :] = 0
+                heatmap[i, :, :, w.item() - self.conf.pad_edges :] = 0
 
             disable_filter = False
             if self.training:
