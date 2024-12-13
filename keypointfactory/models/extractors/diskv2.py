@@ -167,6 +167,7 @@ class DISK(BaseModel):
         "weights": None,
         "reward": "depth",
         "pad_edges": 4,
+        "eval_sampling": "nms",
         "arch": {
             "kernel_size": 5,
             "gate": "PReLU",
@@ -186,7 +187,6 @@ class DISK(BaseModel):
             "reward_threshold": 1.5,
             "lm_e": 0.1,
         },
-        "eval_sampling": "nms",
         "estimator": {"name": "degensac", "ransac_th": 1.0},
     }
 
@@ -366,6 +366,7 @@ class DISK(BaseModel):
             if self.training:
                 # Use sampling during training
                 points, logps = self._sample(heatmap, nms=False)
+                disable_filter = True
             else:
                 if self.conf.eval_sampling == "nms":
                     # Use NMS during evaluation
