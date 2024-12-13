@@ -186,11 +186,6 @@ class ThinDownBlock(nn.Module):
         )
         self.sequence = nn.Sequential(*sequence_list)
 
-        if in_ == out_:
-            self.shortcut = NoOp()
-        else:
-            self.shortcut = nn.Conv2d(in_, out_, 1, bias=False)
-
     def forward(self, x):
         x = self.downsample(x)
         return self.sequence(x)
@@ -218,6 +213,11 @@ class ThinResDownBlock(nn.Module):
             nn.Conv2d(in_, out_, size, padding=padding_size, bias=conf.arch.bias)
         )
         self.sequence = nn.Sequential(*sequence_list)
+
+        if in_ == out_:
+            self.shortcut = NoOp()
+        else:
+            self.shortcut = nn.Conv2d(in_, out_, 1, bias=False)
 
     def forward(self, x):
         x = self.downsample(x)
