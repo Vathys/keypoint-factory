@@ -22,6 +22,7 @@ from ..utils.misc import (
     tile,
     reproject_homography,
 )
+from kornia.feature import harris_response
 from ..utils.unet import Unet
 
 
@@ -74,7 +75,7 @@ def point_distribution(logits, budget):
     return proposals, accept_mask, logp
 
 
-def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
+def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
@@ -96,7 +97,7 @@ def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     return score0, score1
 
 
-def depth_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
+def depth_reward(data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
@@ -129,14 +130,29 @@ def depth_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
     return score0, score1
 
 
-def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25):
+def homography_reward(
+    data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25
+):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
+    harris_res = {}
+    for v in range(2):
+        gs = data[f"view{v}"]["image"].new_tensor([0.299, 0.587, 0.114]).view(3, 1, 1)
+        harris_res[f"view{v}"] = harris_response(
+            (data[f"view{v}"]["image"] * gs).sum(dim=1, keepdim=True),
+            k=0.04,
+            grads_mode="sobel",
+        ).squeeze(1)
+
     H_0to1 = data["H_0to1"]
 
-    kpts0_r = reproject_homography(kpts0, H_0to1, data["view1"]["image_size"], False)
-    kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
+    kpts0_r, valid0_r = reproject_homography(
+        kpts0, H_0to1, data["view1"]["image_size"], False
+    )
+    kpts1_r, valid1_r = reproject_homography(
+        kpts1, H_0to1, data["view0"]["image_size"], True
+    )
 
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
     diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
@@ -144,11 +160,37 @@ def homography_reward(data, pred, threshold=2.0, score_type="coarse", lm_e=0.25)
     dist0 = torch.norm(diff0, p=2, dim=-1)
     dist1 = torch.norm(diff1, p=2, dim=-1)
 
-    reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
-    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
+    reproj_error0 = torch.min(dist0, dim=-1).values
+    reproj_error1 = torch.min(dist1, dim=-1).values
 
-    score0 = lscore(reproj_error0, threshold, type=score_type)
-    score1 = lscore(reproj_error1, threshold, type=score_type)
+    if harris_guidance:
+
+        def get_harris_mult(kpts, harris):
+            h_kpts = torch.stack(
+                [
+                    harris[i, kpts[i, :, 1].long(), kpts[i, :, 0].long()]
+                    for i in range(kpts.shape[0])
+                ]
+            )
+            h_scores = torch.zeros_like(h_kpts)
+            thres = 0.005 * h_kpts.max()
+            h_scores[h_kpts < 0] = 0.6
+            h_scores[h_kpts > 0] = 1
+            h_scores[h_kpts.abs() < thres] = 0.4
+
+            return h_scores
+
+        h_scores0 = get_harris_mult(kpts0, harris_res["view0"])
+        h_scores1 = get_harris_mult(kpts1, harris_res["view1"])
+
+        score0 = lscore(reproj_error0, threshold, type=score_type) * h_scores0
+        score1 = lscore(reproj_error1, threshold, type=score_type) * h_scores1
+    else:
+        score0 = lscore(reproj_error0, threshold, type=score_type)
+        score1 = lscore(reproj_error1, threshold, type=score_type)
+
+    score0.masked_scatter_(~valid0_r, torch.zeros_like(score0))
+    score1.masked_scatter_(~valid1_r, torch.zeros_like(score1))
 
     return score0, score1
 
@@ -165,6 +207,7 @@ class DISK(BaseModel):
         "reward": "depth",
         "pad_edges": 4,
         "eval_sampling": "nms",
+        "apply_harris_guidance": True,
         "arch": {
             "kernel_size": 5,
             "gate": "PReLU",
@@ -460,6 +503,7 @@ class DISK(BaseModel):
                 pred,
                 threshold=self.conf.loss.reward_threshold,
                 score_type=self.conf.loss.score_type,
+                harris_guidance=self.conf.apply_harris_guidance,
                 lm_e=self.conf.loss.lm_e,
             )
         elif self.conf.reward == "epipolar":
@@ -468,6 +512,7 @@ class DISK(BaseModel):
                 pred,
                 threshold=self.conf.loss.reward_threshold,
                 score_type=self.conf.loss.score_type,
+                harris_guidance=self.conf.apply_harris_guidance,
             )
         elif self.conf.reward == "homography":
             elementwise_reward0, elementwise_reward1 = homography_reward(
@@ -475,6 +520,7 @@ class DISK(BaseModel):
                 pred,
                 threshold=self.conf.loss.reward_threshold,
                 score_type=self.conf.loss.score_type,
+                harris_guidance=self.conf.apply_harris_guidance,
             )
         else:
             raise ValueError(f"Unknown reward type {self.conf.reward}")
