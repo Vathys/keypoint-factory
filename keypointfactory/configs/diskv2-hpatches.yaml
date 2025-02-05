@@ -19,6 +19,7 @@ model:
     force_num_keypoints: true
     detection_threshold: 0.0
     trainable: true
+    sample_budget: 2048
     reward: homography
     loss:
       reward_threshold: 3
@@ -35,7 +36,7 @@ model:
 train:
   seed: 42
   epochs: 50
-  log_every_iter: 100
+  log_every_iter: 50
   eval_every_iter: 270
   save_every_iter: 270
   log_grad_every_iter: 270
@@ -50,7 +51,7 @@ train:
   plot:
     [5, "keypointfactory.visualization.visualize_batch.make_keypoint_figures"]
   substep: 1
-  warmup: 0
+  warmup: null
 
 benchmarks:
   hpatches:

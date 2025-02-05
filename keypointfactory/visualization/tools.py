@@ -16,6 +16,7 @@ from matplotlib.widgets import RadioButtons, Slider
 from ..geometry.depth import dense_warp_consistency, simple_project, unproject
 from ..geometry.epipolar import T_to_F, generalized_epi_dist
 from ..geometry.homography import sym_homography_error, warp_points_torch
+from ..models.utils.metrics import compute_correctness
 from ..visualization.viz2d import (
     cm_ranking,
     cm_RdGn,
@@ -477,6 +478,28 @@ class HeatmapPlot:
     def clear(self):
         for x in self.artists:
             x.remove()
+
+
+class HomographyCorrectPlot:
+    plot_name = "homography_correct"
+    required_keys = ["keypoints0", "keypoints1", "H_0to1"]
+
+    def __init__(self, fig, axes, data, preds):
+        for i, name in enumerate(preds):
+            pred = preds[name]
+            kpts = [pred["keypoints0"][0], pred["keypoints1"][0]]
+            metrics = compute_correctness(data, pred)
+            correct0 = metrics["correct0"]
+            correct1 = metrics["correct1"]
+
+            plot_keypoints(
+                kpts, colors=[cm_RdGn(correct0[0]), cm_RdGn(correct1[0])], axes=axes[i]
+            )
+
+
+# class DepthCorrectPlot:
+#     plot_name = "depth_correct"
+#     required_keys = ["keypoints0", "keypoints1", "T_0to1"]
 
 
 class ImagePlot:

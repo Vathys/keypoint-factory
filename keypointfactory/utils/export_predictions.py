@@ -84,3 +84,76 @@ def export_predictions(
 
             del pred
     return output_file
+
+
+@torch.no_grad()
+def export_transformed_predictions(
+    loader, model, transform, output_file, keys="*", optional_keys=[]
+):
+    Path(output_file).parent.mkdir(exist_ok=True, parents=True)
+    hfile = h5py.File(str(output_file), "w")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device).eval()
+    for data_ in tqdm(loader, position=0):
+        data_pred = {}
+
+        for tdata_ in transform(data_):
+            tdata_ = batch_to_device(tdata_, device, non_blocking=True)
+            pred = model(tdata_)
+
+            if keys != "*":
+                if len(set(keys) - set(pred.keys())) > 0:
+                    raise ValueError(f"Missing key {set(keys) - set(pred.keys())}")
+                pred = {k: v for k, v in pred.items() if k in keys + optional_keys}
+            assert len(pred) > 0
+
+            pred["transform"] = tdata_["transform"]
+
+            for k in pred.keys():
+                if k.startswith("keypoints"):
+                    idx = k.replace("keypoints", "")
+                    scales = 1.0 / (
+                        tdata_["scales"]
+                        if len(idx) == 0
+                        else tdata_[f"view{idx}"]["scales"]
+                    )
+                    pred[k] = pred[k] * scales[None]
+                if k.startswith("lines"):
+                    idx = k.replace("lines", "")
+                    scales = 1.0 / (
+                        tdata_["scales"]
+                        if len(idx) == 0
+                        else tdata_[f"view{idx}"]["scales"]
+                    )
+                    pred[k] = pred[k] * scales[None]
+                if k.startswith("orig_lines"):
+                    idx = k.replace("orig_lines", "")
+                    scales = 1.0 / (
+                        tdata_["scales"]
+                        if len(idx) == 0
+                        else tdata_[f"view{idx}"]["scales"]
+                    )
+                    pred[k] = pred[k] * scales[None]
+
+            for k, v in pred.items():
+                if k not in data_pred:
+                    data_pred[k] = []
+                data_pred[k].append(v[0].cpu().numpy())
+
+        try:
+            name = data_["name"][0]
+            grp = hfile.create_group(name)
+            for k, v in data_pred.items():
+                if k in ["keypoints0", "keypoint_scores0", "heatmap0"]:
+                    grp.create_dataset(k, data=v[0])
+                else:
+                    subgrp = grp.create_group(k)
+                    for i, vv in enumerate(v):
+                        subgrp.create_dataset(str(i), data=vv)
+        except RuntimeError:
+            continue
+
+        del data_pred
+
+    hfile.close()
+    return output_file

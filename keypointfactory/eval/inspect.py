@@ -41,12 +41,29 @@ if __name__ == "__main__":
         experiment_dir = output_dir / name
         pred_file = experiment_dir / "predictions.h5"
         s, results[name] = load_eval(experiment_dir)
+
+        if len(results[name]["top_k"].unique()) > 1:
+            results[name] = results[name][
+                results[name]["top_k"] == results[name]["top_k"].max()
+            ]
+            # print(f"Showing only top_k={results[name]['top_k'].max()}")
+        if len(results[name]["top_by"].unique()) > 1:
+            results[name] = results[name][
+                results[name]["top_by"] == results[name]["top_by"].unique()[0]
+            ]
+            # print(f"Showing only top_by={results[name]['top_by'].unique()[0]}")
+        if len(results[name]["ransac_th"].unique()) > 1:
+            results[name] = results[name][
+                results[name]["ransac_th"] == results[name]["ransac_th"].max()
+            ]
+            # print(f"Showing only ransac_th={results[name]['ransac_th'].unique()[0]}")
+
         predictions[name] = pred_file
         summaries[name] = s
 
     for name, s in summaries.items():
         print(name)
-        print(s.head(10))
+        print(s.tail(10))
 
     plt.close("all")
 

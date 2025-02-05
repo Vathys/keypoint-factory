@@ -166,7 +166,7 @@ class AUCMetric:
             return np.nan
         else:
             if self.return_mean:
-                return np.mean(cal_error_auc(self._elements, self.thresholds))
+                return np.nanmean(cal_error_auc(self._elements, self.thresholds))
             else:
                 return cal_error_auc(self._elements, self.thresholds)
 

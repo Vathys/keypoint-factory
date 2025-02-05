@@ -88,7 +88,7 @@ def load_model(model_conf, checkpoint, get_last):
     if checkpoint:
         model = load_experiment(checkpoint, conf=model_conf, get_last=get_last).eval()
     else:
-        model = get_model("two_view_pipeline")(model_conf).eval()
+        model = get_model(model_conf.name)(model_conf).eval()
     if not model.is_initialized():
         raise ValueError(
             "The provided model has non-initialized parameters. "

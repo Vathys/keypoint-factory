@@ -1,7 +1,7 @@
 data:
   name: homographies
   data_dir: revisitop1m
-  train_size: 12000
+  train_size: 4000
   val_size: 1000
   batch_size: 2
   triplet: true
@@ -19,17 +19,16 @@ model:
     name: diskv2
     max_num_keypoints: null
     force_num_keypoints: true
-    detection_threshold: 0.0
     sample_budget: 2048
     trainable: True
     reward: homography
     arch:
       down: [16, 32, 64]
       up: [64, 1]
-      down_block: ResDownBlock
-      up_block: ResUpBlock
+      down_block: DownBlock
+      up_block: UpBlock
     loss:
-      reward_threshold: 3
+      reward_threshold: 2
       score_type: coarse
       lm_e: 0.01
   batch_triplets: false
@@ -59,9 +58,7 @@ train:
 benchmarks:
   hpatches:
     model:
-      name: triplet_pipeline
-    data:
-      num_workers: 10
+      name: two_view_pipeline
     eval:
       top_k_thresholds: 2048
       top_k_by: "scores"

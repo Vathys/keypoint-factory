@@ -6,6 +6,7 @@ from pprint import pprint
 from typing import Iterable
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 from omegaconf import OmegaConf
@@ -21,6 +22,7 @@ from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_pair_depth, eval_relative_pose_robust
 from ..utils.tools import AUCMetric
+from ..geometry.depth import project, sample_depth
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +57,6 @@ class MegaDepth1500Pipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
-        "descriptors0",
-        "descriptors1",
     ]
     optional_export_keys = []
 
@@ -118,26 +118,79 @@ class MegaDepth1500Pipeline(EvalPipeline):
             assert "depth" in data["view0"]
             pred = cache_loader(data)
             data = map_tensor(data, lambda x: torch.squeeze(x, dim=0))
-            pred = map_tensor(pred, lambda x: torch.squeeze(x, dim=0))
             scene_name = data["name"][0].split("-")[0]
             for top_k in conf.top_k_thresholds:
                 for top_by in conf.top_k_by:
+                    kpts0 = pred["keypoints0"]
+                    kpts1 = pred["keypoints1"]
+                    kpts_score0 = pred["keypoint_scores0"]
+                    kpts_score1 = pred["keypoint_scores1"]
+                    new_pred = {}
+                    if top_by == "scores":
+                        idxs0 = torch.argsort(kpts_score0, descending=True)[:top_k]
+                        idxs1 = torch.argsort(kpts_score1, descending=True)[:top_k]
+
+                        new_pred = {
+                            "keypoints0": kpts0[idxs0],
+                            "keypoints1": kpts1[idxs1],
+                            "keypoint_scores0": kpts_score0[idxs0],
+                            "keypoint_scores1": kpts_score1[idxs1],
+                        }
+                    elif top_by == "dist":
+                        depth0 = data["view0"]["depth"]
+                        depth1 = data["view1"]["depth"]
+                        cam0 = data["view0"]["camera"]
+                        cam1 = data["view1"]["camera"]
+                        T0_1 = data["T_0to1"]
+                        T1_0 = data["T_1to0"]
+
+                        d0, valid0 = sample_depth(kpts0[None], depth0[None])
+                        d1, valid1 = sample_depth(kpts1[None], depth1[None])
+
+                        kpts0_1, _ = project(
+                            kpts0[None], d0, depth1[None], cam0, cam1, T0_1, valid0, 3.0
+                        )  # [B, M, 2]
+                        kpts1_0, _ = project(
+                            kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, 3.0
+                        )  # [B, N, 2]
+                        dists = torch.norm(
+                            kpts0_1[:, None] - kpts1[None, :, None], dim=-1
+                        )
+                        values, indices = torch.sort(
+                            dists.min(dim=1)[0], descending=False
+                        )
+                        idxs0 = indices[~values.isnan()[:]][:top_k]
+                        dists = torch.norm(
+                            kpts1_0[:, None] - kpts0[None, :, None], dim=-1
+                        )
+                        values, indices = torch.sort(
+                            dists.min(dim=1)[0], descending=False
+                        )
+                        idxs1 = indices[~values.isnan()[:]][:top_k]
+
+                        new_pred = {
+                            "keypoints0": kpts0[idxs0],
+                            "keypoints1": kpts1[idxs1],
+                            "keypoint_scores0": kpts_score0[idxs0],
+                            "keypoint_scores1": kpts_score1[idxs1],
+                        }
+
+                        del dists
+
                     pair_metrics = eval_pair_depth(
                         data,
-                        pred,
-                        eval_to_0=False,
-                        top_k=int(top_k),
-                        top_by=top_by,
+                        new_pred,
                         thresh=conf.correctness_threshold,
                         padding=conf.padding,
                     )
                     pair_metrics["top_k"] = top_k
                     pair_metrics["top_by"] = top_by
                     pair_metrics["scene"] = scene_name
+                    pair_metrics["name"] = data["name"][0]
                     if self.conf.eval.estimator:
                         for th in test_thresholds:
                             pose_metrics = eval_relative_pose_robust(
-                                data, pred, {**self.conf.eval, "ransac_th": th}
+                                data, new_pred, {**self.conf.eval, "ransac_th": th}
                             )
 
                             pair_metrics = pair_metrics.join(pose_metrics, how="left")
@@ -149,51 +202,60 @@ class MegaDepth1500Pipeline(EvalPipeline):
 
         results = pd.concat(df_list)
 
-        results["repeatability"] = results["num_covisible_correct"] / (
-            2
-            * results["top_k"].map(
-                lambda x: (
-                    x
-                    if x is not None
-                    else (
-                        self.conf.model.max_num_keypoints
-                        if self.conf.model.max_num_keypoints is not None
-                        else float("inf")
-                    )
-                )
-            )
-        )  # Multiple top_k by 2 because we take
-        # sum of correct points from two images
+        # results["repeatability"] = results["num_covisible_correct"] / (
+        #     2
+        #     * results["top_k"].map(
+        #         lambda x: (
+        #             x
+        #             if x is not None
+        #             else (
+        #                 self.conf.model.max_num_keypoints
+        #                 if self.conf.model.max_num_keypoints is not None
+        #                 else float("inf")
+        #             )
+        #         )
+        #     )
+        # )  # Multiple top_k by 2 because we take
+        # # sum of correct points from two images
 
-        def calc_auc(df):
-            auc = AUCMetric(list(range(1, 11)), df)
-            return auc.compute()
+        results["repeatability"] = (
+            results["num_covisible_correct"] / results["num_covisible"]
+        )
+        results["localization"] = (
+            results["localization_score"] / results["num_covisible_correct"]
+        )
 
-        groupby_columns = ["top_k", "top_by"]
-        if self.conf.eval.summarize_by_scene:
-            groupby_columns.append("scene")
-        agg_funcs = {
-            "num_keypoints": ("num_keypoints", "sum"),
-            "num_covisible": ("num_covisible", "sum"),
-            "num_covisible_correct": ("num_covisible_correct", "sum"),
-            "localization_score": ("localization_score", "sum"),
-            "repeatability": ("repeatability", "mean"),
-        }
+        def calc_pose_metrics(df):
+            aucs = AUCMetric([1, 3, 5], elements=df, return_mean=False).compute()
+            if not isinstance(aucs, list):
+                aucs = [aucs] * 3
+            return np.nanmean(aucs), aucs
+
+        def custom_aggregation(group):
+            aggregations = {
+                "num_keypoints": group["num_keypoints"].sum(),
+                "num_covisible": group["num_covisible"].sum(),
+                "num_covisible_correct": group["num_covisible_correct"].sum(),
+                "localization_score": group["localization_score"].sum(),
+                "repeatability": group["repeatability"].mean(),
+                "localization": group["localization"].mean(),
+            }
+            if "rel_pose_error" in group.columns:
+                mAA, aucs = calc_pose_metrics(group["rel_pose_error"])
+                aggregations["rel_pose_error_mAA"] = mAA
+                aggregations["rel_pose_error@1px"] = aucs[0]
+                aggregations["rel_pose_error@3px"] = aucs[1]
+                aggregations["rel_pose_error@5px"] = aucs[2]
+            return pd.Series(aggregations)
+
+        groupby_columns = ["top_k", "top_by", "scene"]
 
         if self.conf.eval.estimator:
-            agg_funcs["rel_pose_auc"] = ("rel_pose_error", calc_auc)
             groupby_columns.append("ransac_th")
 
         # Perform the aggregation
         summaries = (
-            results.groupby(groupby_columns)
-            .agg(
-                **{
-                    key: pd.NamedAgg(column=value[0], aggfunc=value[1])
-                    for key, value in agg_funcs.items()
-                }
-            )
-            .reset_index()
+            results.groupby(groupby_columns).apply(custom_aggregation).reset_index()
         )
 
         return summaries, {}, results

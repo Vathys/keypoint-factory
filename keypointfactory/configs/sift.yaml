@@ -28,7 +28,7 @@ benchmarks:
     data:
       triplet:
     eval:
-      top_k_thresholds: 2048
+      top_k_threshold: 2048
       top_k_by: scores
       test_angles:
         [
@@ -51,9 +51,12 @@ benchmarks:
         ]
       test_scales: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
   megadepth1500:
+    model:
+      name: two_view_pipeline
     eval:
       top_k_thresholds: 2048
       top_k_by: scores
       estimator: degensac
+      use_gt: true
+      summarize_by_scene: true
       ransac_th: 1.0
-      use_depth: False

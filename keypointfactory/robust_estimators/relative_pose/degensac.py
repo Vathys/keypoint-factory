@@ -2,6 +2,7 @@ import pydegensac
 import torch
 from kornia.geometry.epipolar import motion_from_essential_choose_solution
 
+import logging
 from ... import logger
 from ...geometry.epipolar import F_to_E
 from ...geometry.wrappers import Pose
@@ -44,13 +45,21 @@ class DegensacPoseEstimator(BaseEstimator):
                 "inliers": torch.tensor([]).to(pts0.device),
             }
 
-        F, mask = pydegensac.findFundamentalMatrix(
-            pts0.squeeze(0).cpu().numpy(),
-            pts1.squeeze(0).cpu().numpy(),
-            px_th=self.conf.ransac_th,
-            conf=self.conf.options["confidence"],
-            max_iters=self.conf.options["max_iters"],
-        )
+        try:
+            F, mask = pydegensac.findFundamentalMatrix(
+                pts0.squeeze(0).cpu().numpy(),
+                pts1.squeeze(0).cpu().numpy(),
+                px_th=self.conf.ransac_th,
+                conf=self.conf.options["confidence"],
+                max_iters=self.conf.options["max_iters"],
+            )
+        except:
+            logger.log(logging.WARN, "Degensac failed to find a solution")
+            return {
+                "success": False,
+                "M_0to1": Pose.from_4x4mat(torch.eye(4)).to(pts0.device),
+                "inliers": torch.tensor([]).to(pts0.device),
+            }
 
         if mask is None:
             logger.warning("Degensac failed to find a solution")
@@ -76,6 +85,6 @@ class DegensacPoseEstimator(BaseEstimator):
 
         return {
             "success": True,
-            "M_0to1": Pose.from_Rt(R.squeeze(), t.squeeze()).to(pts0.device),
+            "M_0to1": Pose.from_Rt(R, t[..., 0]).to(pts0.device),
             "inliers": mask.to(pts0),
         }

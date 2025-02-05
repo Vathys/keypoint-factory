@@ -372,7 +372,7 @@ class DISK(BaseModel):
                     disable_filter = False
                 elif self.conf.eval_sampling == "budget":
                     points, logps = self._sample(
-                        heatmap, self.conf.max_num_keypoints, nms=True
+                        heatmap, self.conf.max_num_keypoints, nms=False
                     )
                     disable_filter = True
                 elif self.conf.eval_sampling == "disk":
@@ -415,7 +415,13 @@ class DISK(BaseModel):
                     -2,
                     mode="zeros",
                 )
-                scores = pad_and_stack(scores, target_length, -1, mode="zeros")
+                scores = pad_and_stack(
+                    scores,
+                    target_length,
+                    -1,
+                    mode="constant",
+                    constant=min([s.min().item() for s in scores]),
+                )
             else:
                 keypoints = torch.stack(keypoints, 0)
                 scores = torch.stack(scores, 0)

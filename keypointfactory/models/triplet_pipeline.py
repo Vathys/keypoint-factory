@@ -16,6 +16,7 @@ from .two_view_pipeline import TwoViewPipeline
 
 from .. import logger
 
+
 def has_triplet(data):
     # we already check for image0 and image1 in required_keys
     return "view2" in data.keys()
@@ -27,6 +28,8 @@ class TripletPipeline(TwoViewPipeline):
         "enumerate_pairs": True,
         **TwoViewPipeline.default_conf,
     }
+
+    required_data_keys = ["view0", "view1", "view2"]
 
     def _forward(self, data):
         if not has_triplet(data):

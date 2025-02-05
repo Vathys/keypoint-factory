@@ -21,67 +21,75 @@ from ..utils.tools import AUCMetric
 from .eval_pipeline import EvalPipeline
 from .io import get_eval_parser, load_model, parse_eval_args
 from .utils import eval_homography_robust, eval_pair_homography
-
-COL_TO_LABELS = {
-    "num_covisible_correct": ("Number of correct covisible points", "NCC Ratio"),
-    "localization_score": ("Sum of localization scores", "Localization Score"),
-    "repeatability": ("Repeatability", "Repeatability"),
-    "H_error_auc": ("Homography Error AUC", "Homography Error (AUC)"),
-}
+from ..geometry.homography import warp_points_torch
 
 
-def plot_scene_summary(summaries, column):
+def plot_scene_summary(summaries, columns, title, ylabel):
     fig, axes = plt.subplots(2, 1, figsize=(16, 14), sharey=True)
 
     illum = summaries[summaries["scene"].map(lambda x: x.startswith("i"))]
     view = summaries[summaries["scene"].map(lambda x: x.startswith("v"))]
 
+    if not isinstance(columns, list):
+        columns = [columns]
+
+    illum = illum.melt(
+        id_vars=["scene"], value_vars=columns, var_name="key", value_name="value"
+    )
+    view = view.melt(
+        id_vars=["scene"], value_vars=columns, var_name="key", value_name="value"
+    )
+    columns = "value"
+    hue = "key"
+
     sns.lineplot(
         data=illum,
         x="scene",
-        y=column,
+        y=columns,
+        hue=hue,
         markers=True,
         dashes=False,
         ax=axes[0],
-        label="per scene (viewpoint)",
     )
     sns.lineplot(
         data=view,
         x="scene",
-        y=column,
+        y=columns,
+        hue=hue,
         markers=True,
         dashes=False,
         ax=axes[1],
-        label="per scene (illumination)",
     )
 
-    axes[0].axhline(
-        y=illum.mean(axis=0, numeric_only=True)[column], label="illumination mean"
-    )
-    axes[0].axhline(
-        y=summaries.mean(axis=0, numeric_only=True)[column],
-        color="black",
-        label="global mean",
-    )
-    axes[1].axhline(
-        y=view.mean(axis=0, numeric_only=True)[column], label="viewpoint mean"
-    )
-    axes[1].axhline(
-        y=summaries.mean(axis=0, numeric_only=True)[column],
-        color="black",
-        label="global mean",
-    )
+    if len(columns) == 1:
+        axes[0].axhline(
+            y=illum.mean(axis=0, numeric_only=True)[columns[0]],
+            label="illumination mean",
+        )
+        axes[0].axhline(
+            y=summaries.mean(axis=0, numeric_only=True)[columns[0]],
+            color="black",
+            label="global mean",
+        )
+        axes[1].axhline(
+            y=view.mean(axis=0, numeric_only=True)[columns[0]], label="viewpoint mean"
+        )
+        axes[1].axhline(
+            y=summaries.mean(axis=0, numeric_only=True)[columns[0]],
+            color="black",
+            label="global mean",
+        )
 
     axes[0].legend()
     axes[1].legend()
 
-    axes[0].set_title(f"{COL_TO_LABELS[column][0]} per scene (illumination)")
+    axes[0].set_title(f"{title} per scene (illumination)")
     axes[0].set_xlabel("Scenes")
-    axes[0].set_ylabel(COL_TO_LABELS[column][1])
+    axes[0].set_ylabel(ylabel)
 
-    axes[1].set_title(f"{COL_TO_LABELS[column][0]} per scene (viewpoint)")
+    axes[1].set_title(f"{title} per scene (viewpoint)")
     axes[1].set_xlabel("Scenes")
-    axes[1].set_ylabel(COL_TO_LABELS[column][1])
+    axes[1].set_ylabel(ylabel)
 
     for ax in axes:
         for label in ax.get_xticklabels():
@@ -91,51 +99,6 @@ def plot_scene_summary(summaries, column):
     fig.tight_layout()
 
     return fig
-
-
-def get_hpatches_scenes(data_loader, cache_loader, squeezed=True):
-    name = None
-    group = []
-
-    for i, data in enumerate(data_loader):
-        if name is None:
-            name = str(Path(data["name"][0]).parent)
-            if squeezed:
-                group.append(
-                    (
-                        map_tensor(data, lambda x: torch.squeeze(x, dim=0)),
-                        cache_loader(data),
-                    )
-                )
-            else:
-                group.append((data, cache_loader(data)))
-            continue
-
-        if str(Path(data["name"][0]).parent) == name:
-            if squeezed:
-                group.append(
-                    (
-                        map_tensor(data, lambda x: torch.squeeze(x, dim=0)),
-                        cache_loader(data),
-                    )
-                )
-            else:
-                group.append((data, cache_loader(data)))
-        else:
-            yield name, group
-            name = str(Path(data["name"][0]).parent)
-            if squeezed:
-                group = [
-                    (
-                        map_tensor(data, lambda x: torch.squeeze(x, dim=0)),
-                        cache_loader(data),
-                    )
-                ]
-            else:
-                group = [(data, cache_loader(data))]
-
-    if len(group) > 0:
-        yield name, group
 
 
 class HPatchesPipeline(EvalPipeline):
@@ -161,6 +124,7 @@ class HPatchesPipeline(EvalPipeline):
             "top_k_by": "scores",  # either "scores" or "distances", or list of both
             "use_gt": False,
             "summarize_by_scene": True,
+            "ransac_th": 1.0,
         },
     }
     export_keys = [
@@ -168,8 +132,13 @@ class HPatchesPipeline(EvalPipeline):
         "keypoints1",
         "keypoint_scores0",
         "keypoint_scores1",
+    ]
+
+    optional_export_keys = [
         "heatmap0",
         "heatmap1",
+        "descriptors0",
+        "descriptors1",
     ]
 
     def _init(self, conf):
@@ -224,12 +193,54 @@ class HPatchesPipeline(EvalPipeline):
             scene_name = str(Path(data["name"][0]).parent)
             for top_k in conf.top_k_thresholds:
                 for top_by in conf.top_k_by:
+                    kpts0 = pred["keypoints0"]
+                    kpts1 = pred["keypoints1"]
+                    kpts_score0 = pred["keypoint_scores0"]
+                    kpts_score1 = pred["keypoint_scores1"]
+                    H = data["H_0to1"]
+                    new_pred = {}
+                    if top_by == "scores":
+                        idxs0 = torch.argsort(kpts_score0, descending=True)[:top_k]
+                        idxs1 = torch.argsort(kpts_score1, descending=True)[:top_k]
+
+                        new_pred = {
+                            "keypoints0": kpts0[idxs0],
+                            "keypoints1": kpts1[idxs1],
+                            "keypoint_scores0": kpts_score0[idxs0],
+                            "keypoint_scores1": kpts_score1[idxs1],
+                        }
+                        if "descriptors0" in pred:
+                            new_pred["descriptors0"] = pred["descriptors0"][idxs0]
+                            new_pred["descriptors1"] = pred["descriptors1"][idxs1]
+                    elif top_by == "dist":
+                        kpts0_1 = warp_points_torch(kpts0, H, inverse=False)
+                        kpts1_0 = warp_points_torch(kpts1, H, inverse=True)
+
+                        dists = torch.norm(kpts0_1[:, None] - kpts1[None], dim=-1)
+                        idxs0 = torch.argsort(dists.min(dim=1)[0], descending=False)[
+                            :top_k
+                        ]
+                        dists = torch.norm(kpts1_0[:, None] - kpts0[None], dim=-1)
+                        idxs1 = torch.argsort(dists.min(dim=1)[0], descending=False)[
+                            :top_k
+                        ]
+
+                        new_pred = {
+                            "keypoints0": kpts0[idxs0],
+                            "keypoints1": kpts1[idxs1],
+                            "keypoint_scores0": kpts_score0[idxs0],
+                            "keypoint_scores1": kpts_score1[idxs1],
+                        }
+                        if "descriptors0" in pred:
+                            new_pred["descriptors0"] = pred["descriptors0"][idxs0]
+                            new_pred["descriptors1"] = pred["descriptors1"][idxs1]
+
+                        del dists
+
                     pair_metrics = eval_pair_homography(
                         data,
-                        pred,
+                        new_pred,
                         eval_to_0=False,
-                        top_k=int(top_k) if top_k is not None else top_k,
-                        top_by=top_by,
                         thresh=conf.correctness_threshold,
                         padding=conf.padding,
                     )
@@ -242,7 +253,7 @@ class HPatchesPipeline(EvalPipeline):
                     if self.conf.eval.estimator:
                         for th in test_thresholds:
                             pose_metrics = eval_homography_robust(
-                                data, pred, {**self.conf.eval, "ransac_th": th}
+                                data, new_pred, {**self.conf.eval, "ransac_th": th}
                             )
 
                             pair_metrics = pair_metrics.join(pose_metrics, how="left")
@@ -254,69 +265,97 @@ class HPatchesPipeline(EvalPipeline):
 
         results = pd.concat(df_list)
 
-        results["repeatability"] = results["num_covisible_correct"] / (
-            2
-            * results["top_k"].map(
-                lambda x: (
-                    x
-                    if x is not None
-                    else (
-                        self.conf.model.extractor.max_num_keypoints
-                        if self.conf.model.extractor.max_num_keypoints is not None
-                        else float("inf")
-                    )
-                )
-            )
-        )  # Multiple top_k by 2 because we take
-        # sum of correct points from two images
+        # results["repeatability"] = results["num_covisible_correct"] / (
+        #     2
+        #     * results["top_k"].map(
+        #         lambda x: (
+        #             x
+        #             if x is not None
+        #             else (
+        #                 self.conf.model.extractor.max_num_keypoints
+        #                 if self.conf.model.extractor.max_num_keypoints is not None
+        #                 else float("inf")
+        #             )
+        #         )
+        #     )
+        # )  # Multiple top_k by 2 because we take
+        # # sum of correct points from two images
 
-        def calc_auc(df):
-            auc = AUCMetric(list(range(1, 11)), df)
-            return auc.compute()
+        results["repeatability"] = (
+            results["num_covisible_correct"] / results["num_covisible"]
+        )
+        results["localization"] = (
+            results["localization_score"] / results["num_covisible_correct"]
+        )
 
-        groupby_columns = ["top_k", "top_by", "scene"]
+        def calc_pose_metrics(df):
+            aucs = AUCMetric([1, 3, 5], elements=df, return_mean=False).compute()
+            if not isinstance(aucs, list):
+                aucs = [aucs] * 3
+            return np.nanmean(aucs), aucs
 
-        agg_funcs = {
-            "num_keypoints": ("num_keypoints", "sum"),
-            "num_covisible": ("num_covisible", "sum"),
-            "num_covisible_correct": ("num_covisible_correct", "sum"),
-            "localization_score": ("localization_score", "sum"),
-            "repeatability": ("repeatability", "mean"),
-        }
+        def custom_aggregation(group):
+            aggregations = {
+                "num_keypoints": group["num_keypoints"].sum(),
+                "num_covisible": group["num_covisible"].sum(),
+                "num_covisible_correct": group["num_covisible_correct"].sum(),
+                "localization_score": group["localization_score"].sum(),
+                "repeatability": group["repeatability"].mean(),
+                "localization": group["localization"].mean(),
+            }
+            if "H_error" in group.columns:
+                mAA, aucs = calc_pose_metrics(group["H_error"])
+                aggregations["H_error_mAA"] = mAA
+                aggregations["H_error@1px"] = aucs[0]
+                aggregations["H_error@3px"] = aucs[1]
+                aggregations["H_error@5px"] = aucs[2]
+            return pd.Series(aggregations)
+
+        groupby_columns = ["top_k", "top_by"]
+
+        if self.conf.eval.summarize_by_scene:
+            groupby_columns.append("scene")
 
         if self.conf.eval.estimator:
-            agg_funcs["H_error_auc"] = ("H_error_ransac", calc_auc)
             groupby_columns.append("ransac_th")
 
         # Perform the aggregation
         summaries = (
-            results.groupby(groupby_columns)
-            .agg(
-                **{
-                    key: pd.NamedAgg(column=value[0], aggfunc=value[1])
-                    for key, value in agg_funcs.items()
-                }
-            )
-            .reset_index()
+            results.groupby(groupby_columns).apply(custom_aggregation).reset_index()
         )
 
         figures = {}
         if "num_covisible_correct" in summaries.columns:
             figures["ncc_ratio"] = plot_scene_summary(
-                summaries, "num_covisible_correct"
+                summaries,
+                "num_covisible_correct",
+                title="Number of correct covisible points",
+                ylabel="NCC Ratio",
             )
 
         if "localization_score" in summaries.columns:
-            figures["loc_scores"] = plot_scene_summary(summaries, "localization_score")
+            figures["loc_scores"] = plot_scene_summary(
+                summaries,
+                "localization_score",
+                title="Sum of localization scores",
+                ylabel="Localization Score",
+            )
 
         if "repeatability" in summaries.columns:
-            figures["repeatability"] = plot_scene_summary(summaries, "repeatability")
+            figures["repeatability"] = plot_scene_summary(
+                summaries,
+                "repeatability",
+                title="Repeatability",
+                ylabel="Repeatability",
+            )
 
-        if "H_error_auc" in summaries.columns:
-            figures["H_error_auc"] = plot_scene_summary(summaries, "H_error_auc")
-
-        if not self.conf.eval.summarize_by_scene:
-            summaries = summaries.mean(axis=0, numeric_only=True).reset_index()
+        if self.conf.eval.estimator:
+            figures["H_error"] = plot_scene_summary(
+                summaries,
+                ["H_error@1px", "H_error@3px", "H_error@5px", "H_error_mAA"],
+                title="Homography Error",
+                ylabel="Homography Error",
+            )
 
         return summaries, figures, results
 

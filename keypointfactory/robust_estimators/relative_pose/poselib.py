@@ -19,8 +19,8 @@ class PoseLibRelativePoseEstimator(BaseEstimator):
         camera0 = data["camera0"]
         camera1 = data["camera1"]
         M, info = poselib.estimate_relative_pose(
-            pts0.numpy(),
-            pts1.numpy(),
+            [pts0.numpy()[i] for i in range(pts0.shape[0])],
+            [pts1.numpy()[i] for i in range(pts1.shape[0])],
             camera0.to_cameradict(),
             camera1.to_cameradict(),
             {

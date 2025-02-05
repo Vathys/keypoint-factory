@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import torch
+import cv2 as cv
 from kornia.geometry.homography import find_homography_dlt
 
 from ..geometry.depth import project, sample_depth
@@ -26,6 +27,29 @@ def check_keys_recursive(d, pattern):
             assert k in d.keys()
 
 
+def get_transform_homography(transform, image_shape):
+    height, width = image_shape
+    angle = transform[0].item()
+    scale = transform[1].item()
+    resize = transform[2].item()
+
+    rot_mat = cv.getRotationMatrix2D((width.item() / 2, height.item() / 2), angle, 1.0)
+    rot_mat = np.vstack([rot_mat, [0.0, 0.0, 1.0]])
+
+    new_height, new_width = int(height * scale), int(width * scale)
+    recenter_mat = np.array(
+        [
+            [1.0, 0.0, (new_width - width) / 2],
+            [0.0, 1.0, (new_height - height) / 2],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    if resize:
+        recenter_mat[:2, :] = recenter_mat[:2, :] * (1 / scale)
+
+    return torch.tensor(recenter_mat @ rot_mat, device=transform.device)
+
+
 def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
     def compute_correctness_single(kpts, kpts_w):
         dist = torch.norm(kpts_w[:, None] - kpts[None], dim=-1)
@@ -35,6 +59,7 @@ def compute_correctness(kpts1, kpts2, kpts1_w, kpts2_w, thresh, mutual=True):
                 torch.Tensor(dist.shape),
                 torch.Tensor(dist.shape),
             )
+        dist = dist.nan_to_num(float("inf"))
         min_dist, matches = dist.min(dim=1)
         correct = min_dist <= thresh
         if mutual:
@@ -63,11 +88,7 @@ def get_metrics_homography(
     H,
     thresh=3.0,
     padding=4.0,
-    top_k=None,
-    top_by="scores",
     return_sum=True,
-    kpts_scores0=None,
-    kpts_scores1=None,
 ):
     """
     Computes a series of metrics from the keypoints and homography
@@ -100,30 +121,6 @@ def get_metrics_homography(
     """
     return_dict = {}
 
-    if top_k is not None:
-        if kpts_scores0 is None or kpts_scores1 is None:
-            raise ValueError("kpts_scores0 and kpts_scores1 must be provided")
-
-        if top_by == "scores":
-            idxs0 = torch.argsort(kpts_scores0, descending=True)[:top_k]
-            idxs1 = torch.argsort(kpts_scores1, descending=True)[:top_k]
-
-            kpts0 = kpts0[idxs0]
-            kpts1 = kpts1[idxs1]
-        elif top_by == "dist":
-            kpts0_1 = warp_points_torch(kpts0, H, inverse=False)
-            kpts1_0 = warp_points_torch(kpts1, H, inverse=True)
-
-            dists = torch.norm(kpts0_1[:, None] - kpts1[None], dim=-1)
-            idxs0 = torch.argsort(dists.min(dim=1)[0], descending=False)[:top_k]
-            dists = torch.norm(kpts1_0[:, None] - kpts0[None], dim=-1)
-            idxs1 = torch.argsort(dists.min(dim=1)[0], descending=False)[:top_k]
-
-            kpts0 = kpts0[idxs0]
-            kpts1 = kpts1[idxs1]
-
-            del dists
-
     kpts0_1 = warp_points_torch(kpts0.double(), H.double(), inverse=False)
     kpts1_0 = warp_points_torch(kpts1.double(), H.double(), inverse=True)
 
@@ -152,15 +149,15 @@ def get_metrics_homography(
         return_dict["num_covisible"] = vis0.sum() + vis1.sum()
         return_dict["num_covisible_correct"] = correct0.sum() + correct1.sum()
         return_dict["localization_score"] = score0.sum() + score1.sum()
-        return_dict["repeatability"] = div0(
-            correct0.sum() + correct1.sum(), vis0.sum() + vis1.sum()
-        ).float()
+        # return_dict["repeatability"] = div0(
+        #     correct0.sum() + correct1.sum(), vis0.sum() + vis1.sum()
+        # ).float()
     else:
         return_dict["num_keypoints"] = torch.tensor(kpts1.shape[0])
         return_dict["num_covisible"] = vis1.sum()
         return_dict["num_covisible_correct"] = correct1.sum()
         return_dict["localization_score"] = score1.sum()
-        return_dict["repeatability"] = div0(correct1.sum(), vis1.sum()).float()
+        # return_dict["repeatability"] = div0(correct1.sum(), vis1.sum()).float()
 
     return return_dict
 
@@ -169,9 +166,6 @@ def eval_pair_homography(
     data,
     pred,
     eval_to_0=False,
-    only_eval_second=False,
-    top_k=None,
-    top_by="scores",
     thresh=3.0,
     padding=4.0,
 ):
@@ -205,7 +199,7 @@ def eval_pair_homography(
             return x.item() if torch.numel(x) == 1 else x.numpy()
         return x
 
-    if not isinstance(pred["keypoints0"], dict):
+    if not isinstance(pred["keypoints1"], dict):
         metric_dict = get_metrics_homography(
             pred["keypoints0"],
             pred["keypoints1"],
@@ -214,94 +208,52 @@ def eval_pair_homography(
             H,
             thresh,
             padding,
-            top_k=top_k,
-            top_by=top_by,
-            kpts_scores0=pred["keypoint_scores0"],
-            kpts_scores1=pred["keypoint_scores1"],
         )
 
         return_list.append(map_tensor(metric_dict, untorch))
     else:
         if eval_to_0:
-            bmat0 = pred["transform0"]["0"]
-            bmat1 = pred["transform1"]["0"]
-            bdsize0 = pred["dsize0"]["0"]
-            bdsize1 = pred["dsize1"]["0"]
-            # print(pred["transform_id"]["0"])
+            bdsize = data["view1"]["image_size"]
+            bmat = get_transform_homography(pred["transform"]["0"], bdsize)
 
-            bkpts0 = pred["keypoints0"]["0"]
-            bkpts1 = pred["keypoints1"]["0"]
-            bkpts_scores0 = pred["keypoint_scores0"]["0"]
-            bkpts_scores1 = pred["keypoint_scores1"]["0"]
+            bkpts = pred["keypoints1"]["0"]
 
-            for i in range(len(pred["keypoints0"])):
+            for i in range(len(pred["keypoints1"])):
                 index = str(i)
-                if not only_eval_second:
 
-                    tmat0 = pred["transform0"][index]
-                    dsize0 = pred["dsize0"][index]
-                    H0 = tmat0.inverse() @ bmat0
+                tmat = get_transform_homography(pred["transform"][index], bdsize)
 
-                    kpts0 = pred["keypoints0"][index]
-                    kpts_scores0 = pred["keypoint_scores0"][index]
+                H1 = bmat.inverse() @ tmat
 
-                    metric_dict0 = get_metrics_homography(
-                        bkpts0,
-                        kpts0,
-                        bdsize0.flip(0),
-                        dsize0.flip(0),
-                        H0,
-                        thresh,
-                        padding,
-                        return_sum=False,
-                        top_k=top_k,
-                        top_by=top_by,
-                        kpts_scores0=bkpts_scores0,
-                        kpts_scores1=kpts_scores0,
-                    )
-                    metric_dict0["transform"] = pred["transform_id"][index]
-                    metric_dict0["image"] = torch.tensor(0)
-                    return_list.append(map_tensor(metric_dict0, untorch))
+                kpts = pred["keypoints1"][index]
 
-                tmat1 = pred["transform1"][index]
-                dsize1 = pred["dsize1"][index]
-
-                H1 = tmat1.inverse() @ bmat1
-
-                kpts1 = pred["keypoints1"][index]
-                kpts_scores1 = pred["keypoint_scores1"][index]
-
-                metric_dict1 = get_metrics_homography(
-                    bkpts1,
-                    kpts1,
-                    bdsize1.flip(0),
-                    dsize1.flip(0),
+                metric_dict = get_metrics_homography(
+                    bkpts,
+                    kpts,
+                    bdsize.flip(0),
+                    bdsize.flip(0),
                     H1,
                     thresh,
                     padding,
                     return_sum=False,
-                    top_k=top_k,
-                    top_by=top_by,
-                    kpts_scores0=bkpts_scores1,
-                    kpts_scores1=kpts_scores1,
                 )
-                metric_dict1["transform"] = pred["transform_id"][index]
-                metric_dict1["image"] = torch.tensor(1)
-                return_list.append(map_tensor(metric_dict1, untorch))
+                metric_dict["rotation"] = pred["transform"][index][0]
+                metric_dict["scale"] = pred["transform"][index][1]
+                return_list.append(map_tensor(metric_dict, untorch))
         else:
-            for i in range(len(pred["keypoints0"])):
+            for i in range(len(pred["keypoints1"])):
                 index = str(i)
-                tmat0 = pred["transform0"][index]
-                dsize0 = pred["dsize0"][index]
-                tmat1 = pred["transform1"][index]
-                dsize1 = pred["dsize1"][index]
+                dsize0 = data["view0"]["image_size"]
+                tmat0 = data["view0"]["transform"].float()
+                dsize1 = data["view1"]["image_size"]
+                tmat1 = get_transform_homography(
+                    pred["transform"][index], dsize1
+                ).float()
 
-                H_new = tmat1 @ H @ tmat0.inverse()
+                H_new = tmat0.inverse() @ H @ tmat1
 
-                kpts0 = pred["keypoints0"][index]
+                kpts0 = pred["keypoints0"]
                 kpts1 = pred["keypoints1"][index]
-                kpts_scores0 = pred["keypoint_scores0"][index]
-                kpts_scores1 = pred["keypoint_scores1"][index]
 
                 metric_dict = get_metrics_homography(
                     kpts0,
@@ -311,12 +263,9 @@ def eval_pair_homography(
                     H_new,
                     thresh,
                     padding,
-                    top_k=top_k,
-                    top_by=top_by,
-                    kpts_scores0=kpts_scores0,
-                    kpts_scores1=kpts_scores1,
                 )
-                metric_dict["transform"] = pred["transform_id"][index]
+                metric_dict["rotation"] = pred["transform"][index][0]
+                metric_dict["scale"] = pred["transform"][index][1]
                 return_list.append(map_tensor(metric_dict, untorch))
 
     pair_df = pd.DataFrame.from_records(return_list)
@@ -325,18 +274,7 @@ def eval_pair_homography(
     return pair_df
 
 
-def get_metrics_depth(
-    kpts0,
-    kpts1,
-    data_,
-    thresh=3.0,
-    padding=4.0,
-    top_k=None,
-    top_by="scores",
-    return_sum=True,
-    kpts_scores0=None,
-    kpts_scores1=None,
-):
+def get_metrics_depth(kpts0, kpts1, data_, thresh=3.0, padding=4.0, return_sum=True):
     return_dict = {}
 
     depth0 = data_["view0"]["depth"]
@@ -345,55 +283,37 @@ def get_metrics_depth(
     cam1 = data_["view1"]["camera"]
     T0_1 = data_["T_0to1"]
     T1_0 = T0_1.inv()
-
-    if top_k is not None:
-        if kpts_scores0 is None or kpts_scores1 is None:
-            raise ValueError("kpts_scores0 and kpts_scores1 must be provided")
-
-        if top_by == "scores":
-            idxs0 = torch.argsort(kpts_scores0, descending=True)[:top_k]
-            idxs1 = torch.argsort(kpts_scores1, descending=True)[:top_k]
-
-            kpts0 = kpts0[idxs0]
-            kpts1 = kpts1[idxs1]
-        elif top_by == "dist":
-            d0, valid0 = sample_depth(kpts0[None], depth0[None])
-            d1, valid1 = sample_depth(kpts1[None], depth1[None])
-
-            kpts0_1, _ = project(
-                kpts0[None], d0, depth1[None], cam0, cam1, T0_1, valid0, 3.0
-            )  # [B, M, 2]
-            kpts1_0, _ = project(
-                kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, 3.0
-            )  # [B, N, 2]
-            dists = torch.norm(kpts0_1[:, None] - kpts1[None, :, None], dim=-1)
-            values, indices = torch.sort(dists.min(dim=1)[0], descending=False)
-            idxs0 = indices[~values.isnan()[:]][:top_k]
-            dists = torch.norm(kpts1_0[:, None] - kpts0[None, :, None], dim=-1)
-            values, indices = torch.sort(dists.min(dim=1)[0], descending=False)
-            idxs1 = indices[~values.isnan()[:]][:top_k]
-
-            kpts0 = kpts0[idxs0].squeeze(0)
-            kpts1 = kpts1[idxs1].squeeze(0)
-
-            del dists
+    image0_shape = torch.tensor(depth0.shape[:2][::-1])
+    image1_shape = torch.tensor(depth1.shape[:2][::-1])
 
     d0, valid0 = sample_depth(kpts0[None], depth0[None])
     d1, valid1 = sample_depth(kpts1[None], depth1[None])
 
     kpts0_1, vis0 = project(
-        kpts0[None], d0, depth1[None], cam0, cam1, T0_1, valid0, 3.0
+        kpts0[None], d0, depth1[None], cam0, cam1, T0_1, valid0, None
     )  # [M, 2]
     kpts1_0, vis1 = project(
-        kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, 3.0
+        kpts1[None], d1, depth0[None], cam1, cam0, T1_0, valid1, None
     )  # [N, 2]
 
     kpts0 = kpts0.squeeze(0)
     kpts1 = kpts1.squeeze(0)
     kpts0_1 = kpts0_1.squeeze(0)
     kpts1_0 = kpts1_0.squeeze(0)
-    vis0 = vis0.squeeze(0)
-    vis1 = vis1.squeeze(0)
+    vis0 = (
+        vis0
+        & torch.all(
+            (kpts0_1 >= padding) & (kpts0_1 < (image1_shape - padding)),
+            dim=-1,
+        )
+    ).squeeze(0)
+    vis1 = (
+        vis1
+        & torch.all(
+            (kpts1_0 >= padding) & (kpts1_0 < (image0_shape - padding)),
+            dim=-1,
+        )
+    ).squeeze(0)
 
     metrics = compute_correctness(kpts0, kpts1, kpts0_1, kpts1_0, thresh, True)
 
@@ -427,10 +347,6 @@ def get_metrics_depth(
 def eval_pair_depth(
     data,
     pred,
-    eval_to_0=False,
-    only_eval_second=False,
-    top_k=None,
-    top_by="scores",
     thresh=3.0,
     padding=4.0,
 ):
@@ -443,15 +359,7 @@ def eval_pair_depth(
 
     if not isinstance(pred["keypoints0"], dict):
         metric_dict = get_metrics_depth(
-            pred["keypoints0"],
-            pred["keypoints1"],
-            data,
-            thresh,
-            padding,
-            top_k=top_k,
-            top_by=top_by,
-            kpts_scores0=pred["keypoint_scores0"],
-            kpts_scores1=pred["keypoint_scores1"],
+            pred["keypoints0"], pred["keypoints1"], data, thresh, padding
         )
 
         return_list.append(map_tensor(metric_dict, untorch))
@@ -599,10 +507,10 @@ def get_depth_matches(kpts0, kpts1, depth0, depth1, camera0, camera1, T_0to1):
     d1, valid1 = sample_depth(kpts1, depth1)
 
     kpts0_1, visible0 = project(
-        kpts0, d0, depth1, camera0, camera1, T_0to1, valid0, 1.0
+        kpts0, d0, depth1, camera0, camera1, T_0to1, valid0, None
     )  # [B, M, 2]
     kpts1_0, visible1 = project(
-        kpts1, d1, depth0, camera1, camera0, T_0to1, valid1, 1.0
+        kpts1, d1, depth0, camera1, camera0, T_0to1.inv(), valid1, None
     )  # [B, N, 2]
     mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
 
@@ -760,17 +668,16 @@ def eval_relative_pose_robust(data, pred, conf):
         "camera1": data["view1"]["camera"],
     }
     est = estimator(data_)
-
     if not est["success"]:
         results["rel_pose_error"] = float("inf")
         results["ransac_inl"] = 0
         results["ransac_inl%"] = 0
     else:
         # R, t, inl = ret
-        M = est["M_0to1"]
+        M = est["M_0to1"].squeeze(0)
         inl = est["inliers"].numpy()
         t_error, r_error = relative_pose_error(T_gt, M.R, M.t)
-        results["rel_pose_error"] = max(r_error, t_error)
+        results["rel_pose_error"] = max(r_error.item(), t_error.item())
         results["ransac_inl"] = np.sum(inl)
         results["ransac_inl%"] = np.mean(inl)
 
@@ -805,14 +712,14 @@ def eval_homography_robust(data, pred, conf):
     est = estimator(data_)
 
     if not est["success"]:
-        results["H_error_ransac"] = float("inf")
+        results["H_error"] = float("inf")
         results["ransac_inl"] = 0
         results["ransac_inl%"] = 0
     else:
         # R, t, inl = ret
         M = est["M_0to1"]
         inl = est["inliers"].numpy()
-        results["H_error_ransac"] = homography_corner_error(
+        results["H_error"] = homography_corner_error(
             M, H_gt, data["view0"]["image_size"]
         ).item()
         results["ransac_inl"] = np.sum(inl)

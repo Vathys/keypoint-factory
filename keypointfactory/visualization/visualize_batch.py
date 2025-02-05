@@ -40,8 +40,12 @@ def make_reward_figures(pred_, data_, n_pairs=2):
 
         H_0to1 = data["H_0to1"]
 
-        kpts0_r = reproject_homography(kp0, H_0to1, data["view1"]["image_size"], False)
-        kpts1_r = reproject_homography(kp1, H_0to1, data["view0"]["image_size"], True)
+        kpts0_r, valid0_r = reproject_homography(
+            kp0, H_0to1, data["view1"]["image_size"], False
+        )
+        kpts1_r, valid1_r = reproject_homography(
+            kp1, H_0to1, data["view0"]["image_size"], True
+        )
 
         diff0 = kp0[:, :, None, :] - kpts1_r[:, None, :, :]
         diff1 = kp1[:, None, :, :] - kpts0_r[:, :, None, :]
@@ -241,3 +245,91 @@ def make_match_figures(pred_, data_, n_pairs=2):
     ]
 
     return {"matching": fig}
+
+
+def single_keypoint(pred_, data_, n_pairs=2):
+    images, kpts, colors = [], [], []
+
+    pred = batch_to_device(pred_, "cpu", non_blocking=False)
+    data = batch_to_device(data_, "cpu", non_blocking=False)
+
+    kp = pred["keypoints"]
+
+    images.append(
+        [
+            data["view0"]["image"][i].permute(1, 2, 0)
+            for i in range(data["view0"]["image"].shape[0])
+        ]
+    )
+    kpts.append([kp[i] for i in range(kp.shape[0])])
+
+    fig, axes = plot_image_grid(images, return_fig=True, set_lim=True)
+    [plot_keypoints(kpts[i], axes=axes[i], ps=1) for i in range(len(axes))]
+
+    return {"keypoints": fig}
+
+
+def single_scores(pred_, data_, n_pairs=2):
+    images, kpts, colors = [], [], []
+
+    pred = batch_to_device(pred_, "cpu", non_blocking=False)
+    data = batch_to_device(data_, "cpu", non_blocking=False)
+
+    kp = pred["keypoints"]
+    kpscore = pred["keypoint_scores"]
+
+    images.append(
+        [
+            data["view0"]["image"][i].permute(1, 2, 0)
+            for i in range(data["view0"]["image"].shape[0])
+        ]
+    )
+    kpts.append([kp[i] for i in range(kp.shape[0])])
+    colors.append([cm_ranking(kpscore[i]) for i in range(kpscore.shape[0])])
+
+    fig, axes = plot_image_grid(images, return_fig=True, set_lim=True)
+    [
+        plot_keypoints(kpts[i], colors=colors[i], axes=axes[i], ps=1)
+        for i in range(len(axes))
+    ]
+
+    return {"scores": fig}
+
+
+def single_hm(pred_, data_, n_pairs=2):
+    images, kpts, heatmaps = [], [], []
+
+    pred = batch_to_device(pred_, "cpu", non_blocking=False)
+    data = batch_to_device(data_, "cpu", non_blocking=False)
+
+    kp = pred["keypoints"]
+    if "heatmap" in pred.keys():
+        heatmaps.append(
+            [
+                torch.sigmoid(pred["heatmap"][i, 0])
+                for i in range(pred["heatmap"].shape[0])
+            ]
+        )
+
+    images.append(
+        [
+            data["view0"]["image"][i].permute(1, 2, 0)
+            for i in range(data["view0"]["image"].shape[0])
+        ]
+    )
+    kpts.append([kp[i] for i in range(kp.shape[0])])
+
+    fig, axes = plot_image_grid(images, return_fig=True, set_lim=True)
+    if len(heatmaps) > 0:
+        [plot_heatmaps(heatmaps[i], axes=axes[i]) for i in range(len(axes))]
+
+    return {"heatmap": fig}
+
+
+def single_figures(pred_, data_, n_pairs=2):
+    res = {
+        **single_hm(pred_, data_, n_pairs),
+        **single_keypoint(pred_, data_, n_pairs),
+        **single_scores(pred_, data_, n_pairs),
+    }
+    return res
