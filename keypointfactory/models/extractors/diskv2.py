@@ -75,7 +75,9 @@ def point_distribution(logits, budget):
     return proposals, accept_mask, logp
 
 
-def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25):
+def epipolar_reward(
+    data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25
+):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
@@ -97,7 +99,9 @@ def epipolar_reward(data, pred, threshold=2.0, score_type="coarse", harris_guida
     return score0, score1
 
 
-def depth_reward(data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25):
+def depth_reward(
+    data, pred, threshold=2.0, score_type="coarse", harris_guidance=True, lm_e=0.25
+):
     kpts0 = pred["keypoints0"]
     kpts1 = pred["keypoints1"]
 
@@ -173,10 +177,11 @@ def homography_reward(
                 ]
             )
             h_scores = torch.zeros_like(h_kpts)
-            thres = 0.005 * h_kpts.max()
-            h_scores[h_kpts < 0] = 0.6
-            h_scores[h_kpts > 0] = 1
-            h_scores[h_kpts.abs() < thres] = 0.4
+            for i in range(h_scores.shape[0]):
+                thres = 0.005 * h_kpts[i].max()
+                h_scores[i][h_kpts[i] < 0] = 0.6
+                h_scores[i][h_kpts[i] > 0] = 1
+                h_scores[i][h_kpts[i].abs() < thres] = 0.4
 
             return h_scores
 
