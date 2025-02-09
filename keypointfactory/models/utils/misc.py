@@ -18,10 +18,16 @@ def lscore(dist, thres, type="linear", rescale=True):
         score = torch.where(torch.isnan(dist), -float("inf"), 1 - (dist / thres))
     elif type == "fine":
         score = torch.where(
-            torch.isnan(dist), -float("inf"), torch.log(thres / (dist + 1e-8)) / thres
+            torch.isnan(dist), -float("inf"), torch.log(thres / (dist + 1e-8))
         )
     elif type == "coarse":
         score = torch.where(torch.isnan(dist), -float("inf"), 1 - (dist / thres) ** 2)
+    elif type == "gaussian":
+        score = torch.where(
+            torch.isnan(dist),
+            -float("inf"),
+            (torch.exp(-(dist**2) / thres) - math.exp(-thres)) / (1 - math.exp(-thres)),
+        )
     else:
         raise RuntimeError(f"Type {type} not found...")
 
@@ -204,7 +210,7 @@ def distance_matrix(fs1, fs2):
     return 1.414213 * (1.0 - dist).clamp(min=1e-6).sqrt()
 
 
-def reproject_homography(kpts, H, image_size, inverse):
+def reproject_homography(kpts, H, image_size, inverse, only_valid=False):
     kptsw = warp_points_torch(kpts, H, inverse)
 
     valid = torch.zeros(
@@ -218,11 +224,13 @@ def reproject_homography(kpts, H, image_size, inverse):
             & (kptsw[b, :, 1] < image_size[b, 0])
         )
 
-    kptsw.masked_scatter_(
-        ~valid[:, :, None].expand(-1, -1, 2),
-        torch.full_like(kptsw, float("NaN"), device=kptsw.device),
-    )
-    return kptsw
+    if only_valid:
+        kptsw.masked_scatter_(
+            ~valid[:, :, None].expand(-1, -1, 2),
+            torch.full_like(kptsw, float("NaN"), device=kptsw.device),
+        )
+
+    return kptsw, valid
 
 
 class CycleMatcher:
@@ -235,10 +243,12 @@ class CycleMatcher:
 
         H_0to1 = data["H_0to1"]
 
-        kpts0_r = reproject_homography(
-            kpts0, H_0to1, data["view1"]["image_size"], False
+        kpts0_r, _ = reproject_homography(
+            kpts0, H_0to1, data["view1"]["image_size"], False, True
         )
-        kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
+        kpts1_r, _ = reproject_homography(
+            kpts1, H_0to1, data["view0"]["image_size"], True, True
+        )
 
         diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
         diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]
@@ -430,8 +440,12 @@ def classify_by_homography(data, pred, threshold=2.0):
 
     H_0to1 = data["H_0to1"]
 
-    kpts0_r = reproject_homography(kpts0, H_0to1, data["view1"]["image_size"], False)
-    kpts1_r = reproject_homography(kpts1, H_0to1, data["view0"]["image_size"], True)
+    kpts0_r, _ = reproject_homography(
+        kpts0, H_0to1, data["view1"]["image_size"], False, True
+    )
+    kpts1_r, _ = reproject_homography(
+        kpts1, H_0to1, data["view0"]["image_size"], True, True
+    )
 
     diff0 = kpts1_r[:, None, :, :] - kpts0[:, :, None, :]
     diff1 = kpts0_r[:, :, None, :] - kpts1[:, None, :, :]

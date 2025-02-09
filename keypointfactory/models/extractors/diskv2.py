@@ -152,19 +152,10 @@ def homography_reward(
     H_0to1 = data["H_0to1"]
 
     kpts0_r, valid0_r = reproject_homography(
-        kpts0, H_0to1, data["view1"]["image_size"], False
+        kpts0, H_0to1, data["view1"]["image_size"], False, True,
     )
     kpts1_r, valid1_r = reproject_homography(
-        kpts1, H_0to1, data["view0"]["image_size"], True
-    )
-
-    kpts0_r.masked_scatter_(
-        ~valid0_r[:, :, None].expand(-1, -1, 2),
-        torch.full_like(kpts0_r, float("NaN"), device=kpts0_r.device),
-    )
-    kpts1_r.masked_scatter_(
-        ~valid1_r[:, :, None].expand(-1, -1, 2),
-        torch.full_like(kpts1_r, float("NaN"), device=kpts1_r.device),
+        kpts1, H_0to1, data["view0"]["image_size"], True, True,
     )
 
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
