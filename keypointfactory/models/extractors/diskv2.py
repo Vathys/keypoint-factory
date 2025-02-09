@@ -158,14 +158,23 @@ def homography_reward(
         kpts1, H_0to1, data["view0"]["image_size"], True
     )
 
+    kpts0_r.masked_scatter_(
+        ~valid0_r[:, :, None].expand(-1, -1, 2),
+        torch.full_like(kpts0_r, float("NaN"), device=kpts0_r.device),
+    )
+    kpts1_r.masked_scatter_(
+        ~valid1_r[:, :, None].expand(-1, -1, 2),
+        torch.full_like(kpts1_r, float("NaN"), device=kpts1_r.device),
+    )
+
     diff0 = kpts0[:, :, None, :] - kpts1_r[:, None, :, :]
     diff1 = kpts1[:, :, None, :] - kpts0_r[:, None, :, :]
 
     dist0 = torch.norm(diff0, p=2, dim=-1)
     dist1 = torch.norm(diff1, p=2, dim=-1)
-
-    reproj_error0 = torch.min(dist0, dim=-1).values
-    reproj_error1 = torch.min(dist1, dim=-1).values
+    
+    reproj_error0 = torch.min(dist0.nan_to_num(nan=float("inf")), dim=-1).values
+    reproj_error1 = torch.min(dist1.nan_to_num(nan=float("inf")), dim=-1).values
 
     if harris_guidance:
 
@@ -193,9 +202,6 @@ def homography_reward(
     else:
         score0 = lscore(reproj_error0, threshold, type=score_type)
         score1 = lscore(reproj_error1, threshold, type=score_type)
-
-    score0.masked_scatter_(~valid0_r, torch.zeros_like(score0))
-    score1.masked_scatter_(~valid1_r, torch.zeros_like(score1))
 
     return score0, score1
 
